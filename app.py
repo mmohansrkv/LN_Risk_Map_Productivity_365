@@ -613,6 +613,7 @@ BASE_STYLE = """
         background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 22px; margin-bottom: 20px; }
     .topbar a { color: var(--primary); text-decoration: none; font-size: 14px; margin-left: 12px; font-weight: 600; }
     .tag { display: inline-block; background: var(--primary-tint); color: var(--primary-dark); padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+    .proc-target { font-size: 12px; color: var(--primary-dark); font-weight: 600; margin-top: 4px; min-height: 16px; }
     body.login-page { max-width: 380px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
         justify-content: center; padding: 16px; }
     body.login-page h1 { text-align: center; font-size: 20px; margin: 0 0 14px; }
@@ -670,23 +671,6 @@ USER_HOME_PAGE = """
     </div>
     """ + FLASHES + """
 
-    {% if processes %}
-    <div class="card">
-        <h2>Process Targets</h2>
-        <p class="note">Daily target hours and share for each process.</p>
-        <table>
-            <tr><th>Process</th><th>Target Hr</th><th>Target %</th></tr>
-            {% for p in processes %}
-            <tr>
-                <td>{{ p.Process }}</td>
-                <td>{{ p.Target_Hr or '-' }}</td>
-                <td>{{ p.Target_Pct or '-' }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-    </div>
-    {% endif %}
-
     <div class="card">
         <h2>New Entry</h2>
         <form method="POST" action="{{ url_for('submit') }}">
@@ -733,12 +717,13 @@ USER_HOME_PAGE = """
                 <div id="processRows">
                     <div class="row3 process-row">
                         <div>
-                            <select class="proc-select">
+                            <select class="proc-select" onchange="updateProcTarget(this)">
                                 <option value="">-- select process --</option>
                                 {% for p in processes %}
-                                <option value="{{ p.Process }}">{{ p.Process }}{% if p.Target_Hr or p.Target_Pct %} (target {{ p.Target_Hr or '-' }}hr / {{ p.Target_Pct or '-' }}%){% endif %}</option>
+                                <option value="{{ p.Process }}" data-target-hr="{{ p.Target_Hr or '' }}" data-target-pct="{{ p.Target_Pct or '' }}">{{ p.Process }}</option>
                                 {% endfor %}
                             </select>
+                            <div class="proc-target note"></div>
                         </div>
                         <div><input type="text" class="proc-desc" placeholder="Description"></div>
                         <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
@@ -812,12 +797,25 @@ function toggleLeave() {
     document.getElementById('processSection').style.display = checked ? 'none' : '';
 }
 
+function updateProcTarget(select) {
+    var opt = select.options[select.selectedIndex];
+    var targetDiv = select.parentElement.querySelector('.proc-target');
+    var hr = opt.getAttribute('data-target-hr');
+    var pct = opt.getAttribute('data-target-pct');
+    if (opt.value && (hr || pct)) {
+        targetDiv.textContent = 'Target: ' + (hr || '-') + ' hr / ' + (pct || '-') + '%';
+    } else {
+        targetDiv.textContent = '';
+    }
+}
+
 function addProcessRow() {
     var container = document.getElementById('processRows');
     var row = container.children[0].cloneNode(true);
     row.querySelector('.proc-select').selectedIndex = 0;
     row.querySelector('.proc-desc').value = '';
     row.querySelector('.proc-hr').value = '';
+    row.querySelector('.proc-target').textContent = '';
     container.appendChild(row);
 }
 
