@@ -699,7 +699,7 @@ USER_HOME_PAGE = """
         </form>
     </div>
 
-    <div class="card">
+    <div class="card" style="{% if pending_hr > 0 %}border:2px solid #c0392b;{% else %}border:2px solid #2e8b57;{% endif %}">
         <h2>Today's Hours — {{ today }}</h2>
         <div class="row3">
             <div><span class="tag">Target: {{ '%g'|format(target_hr) }} hr/day</span></div>
@@ -708,6 +708,15 @@ USER_HOME_PAGE = """
                 Pending: {{ '%g'|format(pending_hr) }} hr
             </span></div>
         </div>
+        {% if pending_hr > 0 %}
+        <p style="color:#c0392b;font-weight:bold;margin-top:14px;margin-bottom:0;">
+            ⚠ Productivity not complete — {{ '%g'|format(pending_hr) }} hr still pending out of {{ '%g'|format(target_hr) }} hr/day.
+        </p>
+        {% else %}
+        <p style="color:#2e8b57;font-weight:bold;margin-top:14px;margin-bottom:0;">
+            ✅ {{ '%g'|format(target_hr) }} hr/day completed.
+        </p>
+        {% endif %}
     </div>
 
     <div class="card">
