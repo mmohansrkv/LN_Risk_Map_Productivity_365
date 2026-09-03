@@ -478,7 +478,7 @@ USER_HOME_PAGE = """
 
             <label>Process</label>
             <div id="processRows">
-                <div class="row2 process-row">
+                <div class="row3 process-row">
                     <div>
                         <select class="proc-select">
                             <option value="">-- select process --</option>
@@ -488,15 +488,16 @@ USER_HOME_PAGE = """
                         </select>
                     </div>
                     <div><input type="text" class="proc-desc" placeholder="Description"></div>
+                    <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
                 </div>
             </div>
             <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add</button>
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
+            <input type="hidden" name="Hr" id="Hr_hidden">
 
-            <div class="row3">
+            <div class="row2">
                 <div><label>Other</label><input type="text" name="Other"></div>
-                <div><label>Hr</label><input type="number" step="0.25" name="Hr"></div>
                 <div><label>Description</label><input type="text" name="Other_Description"></div>
             </div>
 
@@ -534,23 +535,28 @@ function addProcessRow() {
     var row = container.children[0].cloneNode(true);
     row.querySelector('.proc-select').selectedIndex = 0;
     row.querySelector('.proc-desc').value = '';
+    row.querySelector('.proc-hr').value = '';
     container.appendChild(row);
 }
 
 function collectProcessRows() {
     var selects = document.querySelectorAll('#processRows .proc-select');
     var descs = document.querySelectorAll('#processRows .proc-desc');
-    var procs = [], descVals = [];
+    var hrs = document.querySelectorAll('#processRows .proc-hr');
+    var procs = [], descVals = [], hrVals = [];
     for (var i = 0; i < selects.length; i++) {
         var p = selects[i].value.trim();
         var d = descs[i].value.trim();
-        if (p || d) {
+        var h = hrs[i].value.trim();
+        if (p || d || h) {
             procs.push(p);
             descVals.push(d);
+            hrVals.push(h);
         }
     }
     document.getElementById('Process_hidden').value = procs.join('; ');
     document.getElementById('Description_hidden').value = descVals.join('; ');
+    document.getElementById('Hr_hidden').value = hrVals.join('; ');
     if (procs.length === 0) {
         alert('Please select at least one process.');
         return false;
