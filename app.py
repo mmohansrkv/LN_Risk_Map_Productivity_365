@@ -38,6 +38,8 @@ already read from os.environ below, with local fallbacks).
 """
 
 import os
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
 from functools import wraps
 
@@ -60,6 +62,19 @@ EXCEL_FILE = os.path.join(DATA_FOLDER, "productivity_tracker.xlsx")
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
+
+WORK_HOURS_PER_DAY = 8.0
+
+# SMTP settings for the 3:00 PM "you haven't filled 8 hrs today" reminder.
+# If SMTP_SERVER isn't set, reminder emails are skipped (logged only) so the
+# app still runs fine locally without mail configured.
+SMTP_SERVER = os.environ.get("SMTP_SERVER")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USERNAME or "noreply@example.com")
+REMINDER_HOUR = int(os.environ.get("REMINDER_HOUR", "15"))   # 3:00 PM
+REMINDER_MINUTE = int(os.environ.get("REMINDER_MINUTE", "0"))
 
 USERS_SHEET = "Users"
 MASTER_SHEET = "Master"
@@ -344,6 +359,97 @@ def delete_record(date_str, row_idx):
 
 
 # ---------------------------------------------------------------------------
+# Hours worked / pending helpers
+# ---------------------------------------------------------------------------
+def parse_hr_total(hr_value):
+    """Sum a possibly '; '-joined Hr string (from multi-process rows) into a float."""
+    if not hr_value:
+        return 0.0
+    total = 0.0
+    for part in str(hr_value).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            total += float(part)
+        except ValueError:
+            pass
+    return total
+
+
+def total_hr_for_records(records):
+    return sum(parse_hr_total(r.get("Hr")) for r in records)
+
+
+def pending_hr_for_records(records):
+    return max(0.0, WORK_HOURS_PER_DAY - total_hr_for_records(records))
+
+
+# ---------------------------------------------------------------------------
+# Email reminder (3:00 PM daily, for anyone under 8 hrs today)
+# ---------------------------------------------------------------------------
+def send_email(to_email, subject, body):
+    if not SMTP_SERVER:
+        print(f"[reminder] SMTP not configured — would have emailed {to_email}: {subject}")
+        return
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            if SMTP_USERNAME and SMTP_PASSWORD:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+    except Exception as exc:  # pragma: no cover - best-effort reminder
+        print(f"[reminder] Failed to email {to_email}: {exc}")
+
+
+def send_daily_pending_hr_reminders():
+    """For every login account, if today's logged Hr total is below the
+    8 hr/day target (or nothing was filled at all), email that account's
+    login address a reminder."""
+    ensure_workbook()
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_records = get_records_for_date(today)
+    for user in get_users():
+        email = user.get("Email")
+        if not email:
+            continue
+        my_records = [r for r in today_records if r.get("Logged_By") == email]
+        pending = pending_hr_for_records(my_records)
+        if pending > 0:
+            worked = total_hr_for_records(my_records)
+            body = (
+                f"Hi {user.get('Name') or ''},\n\n"
+                f"As of 3:00 PM, you have logged {worked:g} of the {WORK_HOURS_PER_DAY:g} "
+                f"working hours required for {today} in the Productivity Tracker.\n"
+                f"Pending: {pending:g} hr.\n\n"
+                f"Please log in and fill in the remaining entries.\n"
+            )
+            send_email(email, f"Productivity Tracker — {pending:g} hr pending for {today}", body)
+
+
+def _start_reminder_scheduler():
+    """Best-effort background scheduler for the 3:00 PM reminder. Uses
+    APScheduler if installed; silently no-ops otherwise so the app still
+    runs without the extra dependency."""
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+    except ImportError:
+        print("[reminder] apscheduler not installed — daily 3:00 PM reminder disabled. "
+              "Run `pip install apscheduler` to enable it.")
+        return
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        send_daily_pending_hr_reminders,
+        "cron", hour=REMINDER_HOUR, minute=REMINDER_MINUTE,
+    )
+    scheduler.start()
+
+
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
 def admin_required(view_func):
@@ -503,6 +609,18 @@ USER_HOME_PAGE = """
 
             <button type="submit" onclick="return collectProcessRows()">Save Entry</button>
         </form>
+    </div>
+
+    <div class="card">
+        <h2>Today's Hours — {{ today }}</h2>
+        <div class="row3">
+            <div><span class="tag">Target: {{ '%g'|format(target_hr) }} hr/day</span></div>
+            <div><span class="tag">Logged: {{ '%g'|format(total_hr) }} hr</span></div>
+            <div><span class="tag" style="{% if pending_hr > 0 %}background:#f8d7da;color:#721c24;{% else %}background:#d4edda;color:#155724;{% endif %}">
+                Pending: {{ '%g'|format(pending_hr) }} hr
+            </span></div>
+        </div>
+        <p class="note">A reminder email is sent to your login address at 3:00 PM if hours are still pending.</p>
     </div>
 
     <div class="card">
@@ -919,9 +1037,12 @@ def user_home():
     processes = get_process_list()
     records = [r for r in get_today_records() if r.get("Logged_By") == session["user_email"]]
     today = datetime.now().strftime("%Y-%m-%d")
+    total_hr = total_hr_for_records(records)
+    pending_hr = pending_hr_for_records(records)
     return render_template_string(
         USER_HOME_PAGE, master=master, processes=processes, records=records, fields=TRACKER_FIELDS,
-        today=today, user_name=session.get("user_name"), user_email=session.get("user_email")
+        today=today, user_name=session.get("user_name"), user_email=session.get("user_email"),
+        total_hr=total_hr, pending_hr=pending_hr, target_hr=WORK_HOURS_PER_DAY
     )
 
 
@@ -1144,6 +1265,7 @@ def admin_users_delete(row):
 
 # ---------------------------------------------------------------------------
 ensure_workbook()
+_start_reminder_scheduler()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
