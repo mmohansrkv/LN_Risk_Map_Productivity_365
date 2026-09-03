@@ -64,6 +64,7 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
 
 WORK_HOURS_PER_DAY = 8.0
+LEAVE_HR = 8.0  # Hr auto-filled when a user checks "On Leave today"
 
 # SMTP settings for the 3:00 PM "you haven't filled 8 hrs today" reminder.
 # If SMTP_SERVER isn't set, reminder emails are skipped (logged only) so the
@@ -441,6 +442,19 @@ def pending_hr_for_records(records):
     return max(0.0, WORK_HOURS_PER_DAY - total_hr_for_records(records))
 
 
+def entry_counts_by_user(records):
+    """Per Logged_By user: number of entries submitted + total Hr, for a
+    given date's records. Sorted by count, highest first."""
+    counts = {}
+    for r in records:
+        who = r.get("Logged_By") or "(unknown)"
+        if who not in counts:
+            counts[who] = {"Logged_By": who, "count": 0, "hr": 0.0}
+        counts[who]["count"] += 1
+        counts[who]["hr"] += parse_hr_total(r.get("Hr"))
+    return sorted(counts.values(), key=lambda x: x["count"], reverse=True)
+
+
 # ---------------------------------------------------------------------------
 # Email reminder (3:00 PM daily, for anyone under 8 hrs today)
 # ---------------------------------------------------------------------------
@@ -639,6 +653,14 @@ USER_HOME_PAGE = """
                 <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="Emp_Name"></div>
             </div>
 
+            <div class="card" style="background:#fff8e1;border:1px solid #f0d98c;padding:10px 14px;margin:10px 0;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="leaveCheck" onchange="toggleLeave()">
+                    On Leave today (auto-fills {{ '%g'|format(leave_hr) }} hr)
+                </label>
+            </div>
+
+            <div id="processSection">
             <label>Process</label>
             <div id="processRows">
                 <div class="row3 process-row">
@@ -655,6 +677,7 @@ USER_HOME_PAGE = """
                 </div>
             </div>
             <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add</button>
+            </div>
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
             <input type="hidden" name="Hr" id="Hr_hidden">
@@ -721,6 +744,11 @@ function fillEmp() {
     document.getElementById('Emp_Name').value = opt.getAttribute('data-empname');
 }
 
+function toggleLeave() {
+    var checked = document.getElementById('leaveCheck').checked;
+    document.getElementById('processSection').style.display = checked ? 'none' : '';
+}
+
 function addProcessRow() {
     var container = document.getElementById('processRows');
     var row = container.children[0].cloneNode(true);
@@ -731,6 +759,12 @@ function addProcessRow() {
 }
 
 function collectProcessRows() {
+    if (document.getElementById('leaveCheck').checked) {
+        document.getElementById('Process_hidden').value = 'Leave';
+        document.getElementById('Description_hidden').value = 'Leave';
+        document.getElementById('Hr_hidden').value = '{{ leave_hr }}';
+        return true;
+    }
     var selects = document.querySelectorAll('#processRows .proc-select');
     var descs = document.querySelectorAll('#processRows .proc-desc');
     var hrs = document.querySelectorAll('#processRows .proc-hr');
@@ -809,6 +843,25 @@ ADMIN_PAGE = """
             </select>
         </form>
         <a class="btn" href="{{ url_for('download_excel') }}">⬇ Download Full Excel File</a>
+    </div>
+
+    <div class="card">
+        <h2>Productivity Count — {{ selected_date }}</h2>
+        <p class="note">Number of tracker entries each user submitted on this date.</p>
+        {% if user_counts %}
+        <table>
+            <tr><th>Logged By</th><th>Entries</th><th>Total Hr</th></tr>
+            {% for u in user_counts %}
+            <tr>
+                <td>{{ u.Logged_By }}</td>
+                <td>{{ u.count }}</td>
+                <td>{{ '%g'|format(u.hr) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No entries for this date.</p>
+        {% endif %}
     </div>
 
     <div class="card">
@@ -1168,7 +1221,7 @@ def user_home():
         USER_HOME_PAGE, master=master, processes=processes, records=records, fields=TRACKER_FIELDS,
         today=today, user_name=session.get("user_name"), user_email=session.get("user_email"),
         total_hr=total_hr, pending_hr=pending_hr, target_hr=WORK_HOURS_PER_DAY,
-        login_time=session.get("login_time"), login_log=login_log
+        login_time=session.get("login_time"), login_log=login_log, leave_hr=LEAVE_HR
     )
 
 
@@ -1217,9 +1270,10 @@ def admin_panel():
     today = datetime.now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date") or (dates[0] if dates else today)
     records = get_records_for_date(selected_date)
+    user_counts = entry_counts_by_user(records)
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
-        records=records, fields=TRACKER_FIELDS
+        records=records, fields=TRACKER_FIELDS, user_counts=user_counts
     )
 
 
