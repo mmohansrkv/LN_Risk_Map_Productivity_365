@@ -6,11 +6,12 @@ employee and saving everything into an Excel workbook (date-named sheets).
 
 Two kinds of accounts:
   - ADMIN (fixed credentials below): can view all dates, edit/delete any
-    entry, download the Excel workbook, and manage BOTH the employee
-    master list and the user login accounts.
+    entry, download the Excel workbook, and manage the employee master
+    list, the process list, and user login accounts.
   - USERS (email + password, created by the admin): log in and fill the
-    tracker form for any employee in the master list. Users can only VIEW
-    entries (their own submissions) — no edit, delete, or download rights.
+    tracker form for any employee in the master list, picking a Process
+    from the admin-maintained process list. Users can only VIEW entries
+    (their own submissions) — no edit, delete, or download rights.
     Note: the login email identifies who is filling the form, NOT whose
     data is being entered — one login can be used to log data for many
     different employees picked from the master list.
@@ -24,17 +25,16 @@ Admin login:  http://127.0.0.1:5000/admin/login
 User login:   http://127.0.0.1:5000/login
 
 Excel file created at: tracker_data/productivity_tracker.xlsx
-  - "Users" sheet   -> login accounts (Email, Password, Name)
-  - "Master" sheet  -> employee master list (Band, Emp_Id, Emp_Name,
-                        Process, Process_1, Process_2)
-  - date-named sheets -> one row per tracker entry submitted that day
+  - "Users" sheet        -> login accounts (Email, Password, Name)
+  - "Master" sheet       -> employee master list (Band, Emp_Id, Emp_Name)
+  - "Process_List" sheet -> list of selectable process names
+  - date-named sheets    -> one row per tracker entry submitted that day
 
 SECURITY NOTE: Credentials are stored/checked in plain text, which is
 fine for a small internal/local tool. If you ever deploy this somewhere
 public, swap in hashed passwords and HTTPS, and move credentials to
-environment variables (see the earlier attendance-tracker version for
-an example of reading SECRET_KEY / ADMIN_USERNAME / ADMIN_PASSWORD from
-os.environ).
+environment variables (SECRET_KEY / ADMIN_USERNAME / ADMIN_PASSWORD are
+already read from os.environ below, with local fallbacks).
 """
 
 import os
@@ -63,10 +63,12 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
 
 USERS_SHEET = "Users"
 MASTER_SHEET = "Master"
-RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, "Info"}
+PROCESS_SHEET = "Process_List"
+RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, PROCESS_SHEET, "Info"}
 
 USER_COLUMNS = ["Email", "Password", "Name"]
-MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name", "Process", "Process_1", "Process_2"]
+MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name"]
+PROCESS_COLUMNS = ["Process"]
 
 # (internal key, label shown on the form / table header)
 TRACKER_FIELDS = [
@@ -76,10 +78,6 @@ TRACKER_FIELDS = [
     ("Emp_Name", "Emp_Name"),
     ("Process", "Process"),
     ("Description", "Description"),
-    ("Process_1", "Process_1"),
-    ("Description_1", "Description_1"),
-    ("Process_2", "Process_2"),
-    ("Description_2", "Description_2"),
     ("Other", "Other"),
     ("Hr", "Hr"),
     ("Other_Description", "Description"),
@@ -126,7 +124,12 @@ def ensure_workbook():
     if MASTER_SHEET not in wb.sheetnames:
         ws = wb.create_sheet(MASTER_SHEET)
         ws.append(MASTER_COLUMNS)
-        style_header(ws, MASTER_COLUMNS, [10, 12, 20, 16, 16, 16])
+        style_header(ws, MASTER_COLUMNS, [10, 12, 20])
+        changed = True
+    if PROCESS_SHEET not in wb.sheetnames:
+        ws = wb.create_sheet(PROCESS_SHEET)
+        ws.append(PROCESS_COLUMNS)
+        style_header(ws, PROCESS_COLUMNS, [30])
         changed = True
     if changed:
         wb.save(EXCEL_FILE)
@@ -137,7 +140,7 @@ def get_or_create_sheet(wb, sheet_name):
         return wb[sheet_name]
     ws = wb.create_sheet(title=sheet_name)
     ws.append(TRACKER_COLUMNS)
-    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 12, 20, 12, 20, 12, 20, 10, 8, 20, 22])
+    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 16, 24, 12, 8, 24, 22])
     return ws
 
 
@@ -233,6 +236,38 @@ def delete_master(row_idx):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[MASTER_SHEET]
+    ws.delete_rows(row_idx, 1)
+    wb.save(EXCEL_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Process list helpers
+# ---------------------------------------------------------------------------
+def get_process_list():
+    return read_sheet_rows(PROCESS_SHEET, PROCESS_COLUMNS)
+
+
+def add_process(name):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[PROCESS_SHEET]
+    ws.append([name])
+    ws.cell(row=ws.max_row, column=1).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def update_process(row_idx, name):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[PROCESS_SHEET]
+    ws.cell(row=row_idx, column=1, value=name).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def delete_process(row_idx):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[PROCESS_SHEET]
     ws.delete_rows(row_idx, 1)
     wb.save(EXCEL_FILE)
 
@@ -427,10 +462,7 @@ USER_HOME_PAGE = """
                         <option value="{{ loop.index0 }}"
                             data-band="{{ m.Band or '' }}"
                             data-empid="{{ m.Emp_Id or '' }}"
-                            data-empname="{{ m.Emp_Name or '' }}"
-                            data-process="{{ m.Process or '' }}"
-                            data-process1="{{ m.Process_1 or '' }}"
-                            data-process2="{{ m.Process_2 or '' }}">
+                            data-empname="{{ m.Emp_Name or '' }}">
                             {{ m.Emp_Id }} — {{ m.Emp_Name }}
                         </option>
                         {% endfor %}
@@ -445,16 +477,16 @@ USER_HOME_PAGE = """
             </div>
 
             <div class="row2">
-                <div><label>Process</label><input type="text" name="Process" id="Process"></div>
+                <div>
+                    <label>Process</label>
+                    <select name="Process" required>
+                        <option value="">-- select process --</option>
+                        {% for p in processes %}
+                        <option value="{{ p.Process }}">{{ p.Process }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
                 <div><label>Description</label><input type="text" name="Description"></div>
-            </div>
-            <div class="row2">
-                <div><label>Process_1</label><input type="text" name="Process_1" id="Process_1"></div>
-                <div><label>Description_1</label><input type="text" name="Description_1"></div>
-            </div>
-            <div class="row2">
-                <div><label>Process_2</label><input type="text" name="Process_2" id="Process_2"></div>
-                <div><label>Description_2</label><input type="text" name="Description_2"></div>
             </div>
 
             <div class="row3">
@@ -490,9 +522,6 @@ function fillEmp() {
     document.getElementById('Band').value = opt.getAttribute('data-band');
     document.getElementById('Emp_Id').value = opt.getAttribute('data-empid');
     document.getElementById('Emp_Name').value = opt.getAttribute('data-empname');
-    document.getElementById('Process').value = opt.getAttribute('data-process');
-    document.getElementById('Process_1').value = opt.getAttribute('data-process1');
-    document.getElementById('Process_2').value = opt.getAttribute('data-process2');
 }
 </script>
 </body>
@@ -531,6 +560,7 @@ ADMIN_PAGE = """
         <h1>🛠 Admin Panel</h1>
         <div>
             <a href="{{ url_for('admin_master') }}">Employee Master List</a>
+            <a href="{{ url_for('admin_process') }}">Process List</a>
             <a href="{{ url_for('admin_users') }}">Login Accounts</a>
             <a href="{{ url_for('admin_logout') }}">Log out</a>
         </div>
@@ -618,11 +648,6 @@ MASTER_PAGE = """
                 <div><label>Emp_Id</label><input type="text" name="Emp_Id" required></div>
                 <div><label>Emp_Name</label><input type="text" name="Emp_Name" required></div>
             </div>
-            <div class="row3">
-                <div><label>Process</label><input type="text" name="Process"></div>
-                <div><label>Process_1</label><input type="text" name="Process_1"></div>
-                <div><label>Process_2</label><input type="text" name="Process_2"></div>
-            </div>
             <button type="submit">Add to List</button>
         </form>
     </div>
@@ -669,6 +694,72 @@ MASTER_EDIT_PAGE = """
         </form>
     </div>
     <p><a href="{{ url_for('admin_master') }}">← Back to master list</a></p>
+</body>
+</html>
+"""
+
+# --- Admin: process list -----------------------------------------------------
+PROCESS_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Process List</title>""" + BASE_STYLE + """</head>
+<body>
+    <div class="topbar">
+        <h1>🧩 Process List</h1>
+        <div><a href="{{ url_for('admin_panel') }}">← Admin panel</a></div>
+    </div>
+    """ + FLASHES + """
+
+    <div class="card">
+        <h2>Add Process</h2>
+        <form method="POST" action="{{ url_for('admin_process_add') }}">
+            <label>Process name</label>
+            <input type="text" name="Process" required>
+            <button type="submit">Add Process</button>
+        </form>
+        <p class="note">This is the dropdown list users choose from when filling out an entry.</p>
+    </div>
+
+    <div class="card">
+        <h2>Current Processes</h2>
+        {% if processes %}
+        <table>
+            <tr><th>Process</th><th>Actions</th></tr>
+            {% for p in processes %}
+            <tr>
+                <td>{{ p.Process }}</td>
+                <td>
+                    <a class="btn btn-small" href="{{ url_for('admin_process_edit', row=p['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('admin_process_delete', row=p['_row']) }}"
+                          onsubmit="return confirm('Remove this process from the list?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No processes added yet.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+PROCESS_EDIT_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Edit Process</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>✏️ Edit Process</h1>
+    <div class="card">
+        <form method="POST">
+            <label>Process name</label>
+            <input type="text" name="Process" value="{{ record.Process or '' }}" required>
+            <button type="submit">Save Changes</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('admin_process') }}">← Back to process list</a></p>
 </body>
 </html>
 """
@@ -785,10 +876,11 @@ def user_logout():
 def user_home():
     ensure_workbook()
     master = get_master_list()
+    processes = get_process_list()
     records = [r for r in get_today_records() if r.get("Logged_By") == session["user_email"]]
     today = datetime.now().strftime("%Y-%m-%d")
     return render_template_string(
-        USER_HOME_PAGE, master=master, records=records, fields=TRACKER_FIELDS,
+        USER_HOME_PAGE, master=master, processes=processes, records=records, fields=TRACKER_FIELDS,
         today=today, user_name=session.get("user_name"), user_email=session.get("user_email")
     )
 
@@ -918,6 +1010,48 @@ def admin_master_delete(row):
     delete_master(row)
     flash("Employee removed from master list.")
     return redirect(url_for("admin_master"))
+
+
+# ---------------------------------------------------------------------------
+# Admin: process list
+# ---------------------------------------------------------------------------
+@app.route("/admin/process")
+@admin_required
+def admin_process():
+    ensure_workbook()
+    return render_template_string(PROCESS_PAGE, processes=get_process_list())
+
+
+@app.route("/admin/process/add", methods=["POST"])
+@admin_required
+def admin_process_add():
+    name = request.form.get("Process", "").strip()
+    if name:
+        add_process(name)
+        flash(f"Added process '{name}'.")
+    return redirect(url_for("admin_process"))
+
+
+@app.route("/admin/process/edit/<int:row>", methods=["GET", "POST"])
+@admin_required
+def admin_process_edit(row):
+    if request.method == "POST":
+        name = request.form.get("Process", "").strip()
+        update_process(row, name)
+        flash("Process updated.")
+        return redirect(url_for("admin_process"))
+    record = next((p for p in get_process_list() if p["_row"] == row), None)
+    if record is None:
+        abort(404)
+    return render_template_string(PROCESS_EDIT_PAGE, record=record)
+
+
+@app.route("/admin/process/delete/<int:row>", methods=["POST"])
+@admin_required
+def admin_process_delete(row):
+    delete_process(row)
+    flash("Process removed.")
+    return redirect(url_for("admin_process"))
 
 
 # ---------------------------------------------------------------------------
