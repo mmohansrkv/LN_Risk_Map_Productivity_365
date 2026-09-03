@@ -476,18 +476,23 @@ USER_HOME_PAGE = """
                 <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="Emp_Name"></div>
             </div>
 
-            <div class="row2">
-                <div>
-                    <label>Process</label>
-                    <select name="Process" required>
-                        <option value="">-- select process --</option>
-                        {% for p in processes %}
-                        <option value="{{ p.Process }}">{{ p.Process }}</option>
-                        {% endfor %}
-                    </select>
+            <label>Process</label>
+            <div id="processRows">
+                <div class="row2 process-row">
+                    <div>
+                        <select class="proc-select">
+                            <option value="">-- select process --</option>
+                            {% for p in processes %}
+                            <option value="{{ p.Process }}">{{ p.Process }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div><input type="text" class="proc-desc" placeholder="Description"></div>
                 </div>
-                <div><label>Description</label><input type="text" name="Description"></div>
             </div>
+            <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add</button>
+            <input type="hidden" name="Process" id="Process_hidden">
+            <input type="hidden" name="Description" id="Description_hidden">
 
             <div class="row3">
                 <div><label>Other</label><input type="text" name="Other"></div>
@@ -495,7 +500,7 @@ USER_HOME_PAGE = """
                 <div><label>Description</label><input type="text" name="Other_Description"></div>
             </div>
 
-            <button type="submit">Save Entry</button>
+            <button type="submit" onclick="return collectProcessRows()">Save Entry</button>
         </form>
     </div>
 
@@ -522,6 +527,35 @@ function fillEmp() {
     document.getElementById('Band').value = opt.getAttribute('data-band');
     document.getElementById('Emp_Id').value = opt.getAttribute('data-empid');
     document.getElementById('Emp_Name').value = opt.getAttribute('data-empname');
+}
+
+function addProcessRow() {
+    var container = document.getElementById('processRows');
+    var row = container.children[0].cloneNode(true);
+    row.querySelector('.proc-select').selectedIndex = 0;
+    row.querySelector('.proc-desc').value = '';
+    container.appendChild(row);
+}
+
+function collectProcessRows() {
+    var selects = document.querySelectorAll('#processRows .proc-select');
+    var descs = document.querySelectorAll('#processRows .proc-desc');
+    var procs = [], descVals = [];
+    for (var i = 0; i < selects.length; i++) {
+        var p = selects[i].value.trim();
+        var d = descs[i].value.trim();
+        if (p || d) {
+            procs.push(p);
+            descVals.push(d);
+        }
+    }
+    document.getElementById('Process_hidden').value = procs.join('; ');
+    document.getElementById('Description_hidden').value = descVals.join('; ');
+    if (procs.length === 0) {
+        alert('Please select at least one process.');
+        return false;
+    }
+    return true;
 }
 </script>
 </body>
