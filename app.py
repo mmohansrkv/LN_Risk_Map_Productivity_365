@@ -39,6 +39,7 @@ already read from os.environ below, with local fallbacks).
 """
 
 import os
+import io
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -501,6 +502,80 @@ def process_breakdown(record, target_lookup=None):
     return items
 
 
+def expand_record_rows(record, target_lookup=None):
+    """Split a record's ';'-joined Process/Description/Hr/Count strings into
+    one dict per process, each a full copy of the record with Process/
+    Description/Hr/Count overridden to that single process's values (instead
+    of the combined semicolon string), plus the same pct/target figures as
+    process_breakdown. Used to render one table row per process instead of
+    squashing multiple processes into a single semicolon-joined cell.
+
+    Each returned dict also carries:
+      - _is_first: True for the first process row of this entry (used to
+        only print the shared, non-process columns and Actions once, with
+        a rowspan, instead of repeating them on every process sub-row)
+      - _group_size: how many process rows this entry expanded into
+    """
+    target_lookup = target_lookup or {}
+    procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
+    descs = [d.strip() for d in str(record.get("Description") or "").split(";")]
+    hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
+    counts = [c.strip() for c in str(record.get("Count") or "").split(";")]
+    n = max(len(procs), len(descs), len(hrs), len(counts))
+
+    raw = []
+    for i in range(n):
+        p = procs[i] if i < len(procs) else ""
+        d = descs[i] if i < len(descs) else ""
+        h = hrs[i] if i < len(hrs) else ""
+        c = counts[i] if i < len(counts) else ""
+        if p or d or h or c:
+            raw.append((p, d, h, c))
+    if not raw:
+        raw = [("", "", "", "")]
+
+    parsed_hrs = []
+    for _, _, h, _ in raw:
+        try:
+            parsed_hrs.append(float(h) if h else 0.0)
+        except ValueError:
+            parsed_hrs.append(0.0)
+    total_hr = sum(parsed_hrs)
+
+    rows = []
+    for idx, (p, d, h, c) in enumerate(raw):
+        hr_val = parsed_hrs[idx]
+        try:
+            count_val = float(c) if c else 0.0
+        except ValueError:
+            count_val = 0.0
+        pct = round((hr_val / total_hr) * 100) if total_hr > 0 else 0
+        target = target_lookup.get(p, {})
+        target_count_hr = target.get("Target_Count_Hr") or ""
+        target_hr_pct = ""
+        try:
+            tch = float(target_count_hr)
+            if tch > 0 and hr_val > 0:
+                target_hr_pct = round((count_val / (tch * hr_val)) * 100)
+        except (ValueError, TypeError):
+            target_hr_pct = ""
+
+        sub = dict(record)
+        sub["Process"] = p
+        sub["Description"] = d
+        sub["Hr"] = h
+        sub["Count"] = c
+        sub["_pct"] = pct
+        sub["_target_hr"] = target.get("Target_Hr") or ""
+        sub["_target_pct"] = target.get("Target_Pct") or ""
+        sub["_target_count_hr"] = target_count_hr
+        sub["_target_hr_pct"] = target_hr_pct
+        sub["_is_first"] = (idx == 0)
+        sub["_group_size"] = len(raw)
+        rows.append(sub)
+    return rows
+
+
 def entry_counts_by_user(records):
     """Per Logged_By user: number of entries submitted + total Hr, for a
     given date's records. Sorted by count, highest first."""
@@ -807,21 +882,36 @@ USER_HOME_PAGE = """
 
     <div class="card">
         <h2>Your Submissions — {{ today }}</h2>
-        <p class="note">You can edit or delete entries you submitted today.</p>
+        <p class="note">You can edit or delete entries you submitted today. Entries with more than one process are split into one row per process below.</p>
         {% if records %}
         <table>
-            <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}<th>Actions</th></tr>
+            <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}<th>% of Day</th><th>Target hr%</th><th>Actions</th></tr>
             {% for r in records %}
+            {% for sub in r._subrows %}
             <tr>
-                {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
+                {% for key, _ in fields %}
+                    {% if key in ('Process', 'Description', 'Hr', 'Count') %}
+                    <td>{{ sub[key] }}</td>
+                    {% elif sub._is_first %}
+                    <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>{{ r[key] }}</td>
+                    {% endif %}
+                {% endfor %}
+                <td>{{ sub._pct }}%</td>
                 <td>
+                    {% if sub._target_hr or sub._target_pct %}<span class="note">target {{ sub._target_hr or '-' }}hr ({{ sub._target_pct or '-' }}%)</span>{% endif %}
+                    {% if sub._target_hr_pct != '' %}<span class="note">{{ sub._target_hr_pct }}%</span>{% endif %}
+                </td>
+                {% if sub._is_first %}
+                <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>
                     <a class="btn btn-small" href="{{ url_for('user_edit', date=today, row=r['_row']) }}">Edit</a>
                     <form style="display:inline" method="POST" action="{{ url_for('user_delete', date=today, row=r['_row']) }}"
                           onsubmit="return confirm('Delete this entry?');">
                         <button class="btn btn-small btn-danger" type="submit">Delete</button>
                     </form>
                 </td>
+                {% endif %}
             </tr>
+            {% endfor %}
             {% endfor %}
         </table>
         {% else %}
@@ -983,29 +1073,41 @@ ADMIN_PAGE = """
 
     <div class="card">
         <h2>Records — {{ selected_date }}</h2>
+        <p class="note">Entries with more than one process are split into one row per process below.</p>
         {% if records %}
         <table>
             <tr>
                 {% for _, label in fields %}<th>{{ label }}</th>{% endfor %}
-                <th>Process %</th>
+                <th>% of Day</th>
+                <th>Target hr%</th>
                 <th>Actions</th>
             </tr>
             {% for r in records %}
+            {% for sub in r._subrows %}
             <tr>
-                {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
+                {% for key, _ in fields %}
+                    {% if key in ('Process', 'Description', 'Hr', 'Count') %}
+                    <td>{{ sub[key] }}</td>
+                    {% elif sub._is_first %}
+                    <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>{{ r[key] }}</td>
+                    {% endif %}
+                {% endfor %}
+                <td>{{ sub._pct }}%</td>
                 <td>
-                    {% for b in r._breakdown %}
-                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if b.count %}, count {{ b.count|int }}{% endif %}{% if b.target_hr or b.target_pct %} <span class="note">/ target {{ b.target_hr or '-' }}hr ({{ b.target_pct or '-' }}%)</span>{% endif %}{% if b.target_hr_pct != '' %} <span class="note">/ Target hr%: {{ b.target_hr_pct }}%</span>{% endif %}{% if not loop.last %}<br>{% endif %}
-                    {% endfor %}
+                    {% if sub._target_hr or sub._target_pct %}<span class="note">target {{ sub._target_hr or '-' }}hr ({{ sub._target_pct or '-' }}%)</span>{% endif %}
+                    {% if sub._target_hr_pct != '' %}<span class="note">{{ sub._target_hr_pct }}%</span>{% endif %}
                 </td>
-                <td>
+                {% if sub._is_first %}
+                <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>
                     <a class="btn btn-small" href="{{ url_for('admin_edit', date=selected_date, row=r['_row']) }}">Edit</a>
                     <form style="display:inline" method="POST" action="{{ url_for('admin_delete', date=selected_date, row=r['_row']) }}"
                           onsubmit="return confirm('Delete this record?');">
                         <button class="btn btn-small btn-danger" type="submit">Delete</button>
                     </form>
                 </td>
+                {% endif %}
             </tr>
+            {% endfor %}
             {% endfor %}
         </table>
         {% else %}
@@ -1393,6 +1495,9 @@ def user_home():
     master = get_master_list()
     processes = get_process_list()
     records = [r for r in get_today_records() if r.get("Logged_By") == session["user_email"]]
+    target_lookup = {p["Process"]: p for p in processes if p.get("Process")}
+    for r in records:
+        r["_subrows"] = expand_record_rows(r, target_lookup)
     today = now().strftime("%Y-%m-%d")
     total_hr = total_hr_for_records(records)
     pending_hr = pending_hr_for_records(records)
@@ -1500,7 +1605,7 @@ def admin_panel():
     records = get_records_for_date(selected_date)
     target_lookup = {p["Process"]: p for p in get_process_list() if p.get("Process")}
     for r in records:
-        r["_breakdown"] = process_breakdown(r, target_lookup)
+        r["_subrows"] = expand_record_rows(r, target_lookup)
     user_counts = entry_counts_by_user(records)
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
@@ -1547,8 +1652,19 @@ def admin_delete(date, row):
 @app.route("/admin/download")
 @admin_required
 def download_excel():
+    """Download the workbook — with the Users sheet (login emails +
+    passwords) stripped out, so downloaded copies never carry credentials."""
     ensure_workbook()
-    return send_file(EXCEL_FILE, as_attachment=True, download_name="productivity_tracker.xlsx")
+    wb = load_workbook(EXCEL_FILE)
+    if USERS_SHEET in wb.sheetnames:
+        del wb[USERS_SHEET]
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf, as_attachment=True, download_name="productivity_tracker.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 # ---------------------------------------------------------------------------
