@@ -586,6 +586,67 @@ def expand_record_rows(record, target_lookup=None):
     return rows
 
 
+REPORT_COLUMNS = [label for _, label in TRACKER_FIELDS] + ["% of Day", "Target hr%"]
+REPORT_COLUMN_WIDTHS = [12, 8, 10, 16, 16, 24, 10, 8, 24, 22, 10, 10, 12]
+
+
+def build_report_sheet(wb, date_str, target_lookup):
+    """Add one sheet named `date_str` to `wb`, formatted exactly like the
+    admin panel's Records table: one row per process (entries with more
+    than one process are split), plus '% of Day' and 'Target hr%' columns
+    computed the same way expand_record_rows computes them on-screen."""
+    ws = wb.create_sheet(title=date_str)
+    ws.append(REPORT_COLUMNS)
+    style_header(ws, REPORT_COLUMNS, REPORT_COLUMN_WIDTHS)
+
+    records = get_records_for_date(date_str)
+    for record in records:
+        for sub in expand_record_rows(record, target_lookup):
+            row = [sub.get(key, "") for key, _ in TRACKER_FIELDS]
+            row.append(f"{sub['_pct']}%" if sub.get("_pct") != "" else "")
+            target_hr_pct = sub.get("_target_hr_pct")
+            row.append(f"{target_hr_pct}%" if target_hr_pct != "" else "")
+            ws.append(row)
+            row_idx = ws.max_row
+            for col_idx in range(1, len(REPORT_COLUMNS) + 1):
+                ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
+    return ws
+
+
+def build_report_workbook(dates):
+    """Build a fresh workbook with one report-style sheet per date in
+    `dates` (see build_report_sheet), plus the Master and Process_List
+    sheets kept at the end for reference. No Users sheet is ever included."""
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    processes = get_process_list()
+    target_lookup = {p["Process"]: p for p in processes if p.get("Process")}
+
+    for date_str in sorted(dates):
+        build_report_sheet(wb, date_str, target_lookup)
+
+    if not dates:
+        ws = wb.create_sheet("Info")
+        ws["A1"] = "No data available for the selected range."
+
+    if os.path.exists(EXCEL_FILE):
+        src = load_workbook(EXCEL_FILE, data_only=True)
+        for sheet_name in (MASTER_SHEET, PROCESS_SHEET):
+            if sheet_name in src.sheetnames:
+                dst = wb.create_sheet(sheet_name)
+                for row in src[sheet_name].iter_rows(values_only=True):
+                    dst.append(row)
+                columns = MASTER_COLUMNS if sheet_name == MASTER_SHEET else PROCESS_COLUMNS
+                widths = [10, 12, 20] if sheet_name == MASTER_SHEET else [30, 14, 14, 16]
+                style_header(dst, columns, widths)
+                for row_idx in range(2, dst.max_row + 1):
+                    for col_idx in range(1, len(columns) + 1):
+                        dst.cell(row=row_idx, column=col_idx).font = CELL_FONT
+
+    return wb
+
+
 def entry_counts_by_user(records):
     """Per Logged_By user: number of entries submitted + total Hr, for a
     given date's records. Sorted by count, highest first."""
@@ -1678,12 +1739,11 @@ def admin_delete(date, row):
 @app.route("/admin/download")
 @admin_required
 def download_excel():
-    """Download the workbook — with the Users sheet (login emails +
-    passwords) stripped out, so downloaded copies never carry credentials."""
+    """Download every date's records in the same report format shown on the
+    admin panel (one row per process, with % of Day / Target hr% columns).
+    The Users sheet (login emails/passwords) is never included."""
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    if USERS_SHEET in wb.sheetnames:
-        del wb[USERS_SHEET]
+    wb = build_report_workbook(list_available_dates())
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -1696,21 +1756,13 @@ def download_excel():
 @app.route("/admin/download/month/<month>")
 @admin_required
 def download_excel_month(month):
-    """Download a workbook containing only one month's date sheets (e.g.
-    month='2026-09'). Master/Process_List/Info are kept for reference; Users
-    (login emails/passwords) is stripped, same as the full download."""
+    """Download one month's records (e.g. month='2026-09') in the same
+    report format shown on the admin panel (one row per process, with
+    % of Day / Target hr% columns). Master/Process_List are kept for
+    reference; Users (login emails/passwords) is never included."""
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-
-    if USERS_SHEET in wb.sheetnames:
-        del wb[USERS_SHEET]
-
-    keep_always = {MASTER_SHEET, PROCESS_SHEET, "Info"}
-    for name in list(wb.sheetnames):
-        if name in keep_always:
-            continue
-        if not name.startswith(month):
-            del wb[name]
+    month_dates = [d for d in list_available_dates() if d.startswith(month)]
+    wb = build_report_workbook(month_dates)
 
     buf = io.BytesIO()
     wb.save(buf)
