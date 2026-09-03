@@ -684,7 +684,7 @@ USER_HOME_PAGE = """
                     <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
                 </div>
             </div>
-            <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add</button>
+            <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add another process row</button>
             </div>
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
