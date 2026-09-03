@@ -415,6 +415,26 @@ def pending_hr_for_records(records):
     return max(0.0, WORK_HOURS_PER_DAY - total_hr_for_records(records))
 
 
+def split_process_rows(record):
+    """Split a record's ';'-joined Process/Description/Hr strings into a
+    list of {Process, Description, Hr} row dicts, for pre-filling the
+    multi-row process editor on the admin edit page."""
+    procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
+    descs = [d.strip() for d in str(record.get("Description") or "").split(";")]
+    hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
+    n = max(len(procs), len(descs), len(hrs))
+    rows = []
+    for i in range(n):
+        p = procs[i] if i < len(procs) else ""
+        d = descs[i] if i < len(descs) else ""
+        h = hrs[i] if i < len(hrs) else ""
+        if p or d or h:
+            rows.append({"Process": p, "Description": d, "Hr": h})
+    if not rows:
+        rows = [{"Process": "", "Description": "", "Hr": ""}]
+    return rows
+
+
 def process_breakdown(record, target_lookup=None):
     """Split a record's ';'-joined Process and Hr strings into a list of
     {process, hr, pct, target_hr, target_pct} dicts, where pct is that
@@ -905,15 +925,79 @@ EDIT_PAGE = """
 <body>
     <h1>✏️ Edit Record — {{ date }}</h1>
     <div class="card">
-        <form method="POST">
-            {% for key, label in fields %}
+        <form method="POST" onsubmit="return collectProcessRows()">
+            {% for key, label in other_fields %}
+            {% if key != 'Logged_By' %}
             <label>{{ label }}</label>
             <input type="text" name="{{ key }}" value="{{ record[key] or '' }}">
+            {% endif %}
             {% endfor %}
+
+            <label>Process</label>
+            <div id="processRows">
+                {% for row in process_rows %}
+                <div class="row3 process-row">
+                    <div>
+                        <select class="proc-select">
+                            <option value="">-- select process --</option>
+                            {% for p in processes %}
+                            <option value="{{ p.Process }}" {% if p.Process == row.Process %}selected{% endif %}>{{ p.Process }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div><input type="text" class="proc-desc" placeholder="Description" value="{{ row.Description }}"></div>
+                    <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr" value="{{ row.Hr }}"></div>
+                </div>
+                {% endfor %}
+            </div>
+            <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add another process row</button>
+            <input type="hidden" name="Process" id="Process_hidden">
+            <input type="hidden" name="Description" id="Description_hidden">
+            <input type="hidden" name="Hr" id="Hr_hidden">
+
+            <label>Logged By</label>
+            <input type="text" name="Logged_By" value="{{ record.Logged_By or '' }}">
+
             <button type="submit">Save Changes</button>
         </form>
     </div>
     <p><a href="{{ url_for('admin_panel', date=date) }}">← Back to admin panel</a></p>
+
+<script>
+function addProcessRow() {
+    var container = document.getElementById('processRows');
+    var row = container.children[0].cloneNode(true);
+    row.querySelector('.proc-select').selectedIndex = 0;
+    row.querySelector('.proc-desc').value = '';
+    row.querySelector('.proc-hr').value = '';
+    container.appendChild(row);
+}
+
+function collectProcessRows() {
+    var selects = document.querySelectorAll('#processRows .proc-select');
+    var descs = document.querySelectorAll('#processRows .proc-desc');
+    var hrs = document.querySelectorAll('#processRows .proc-hr');
+    var procs = [], descVals = [], hrVals = [];
+    for (var i = 0; i < selects.length; i++) {
+        var p = selects[i].value.trim();
+        var d = descs[i].value.trim();
+        var h = hrs[i].value.trim();
+        if (p || d || h) {
+            procs.push(p);
+            descVals.push(d);
+            hrVals.push(h);
+        }
+    }
+    document.getElementById('Process_hidden').value = procs.join('; ');
+    document.getElementById('Description_hidden').value = descVals.join('; ');
+    document.getElementById('Hr_hidden').value = hrVals.join('; ');
+    if (procs.length === 0) {
+        alert('Please select at least one process.');
+        return false;
+    }
+    return true;
+}
+</script>
 </body>
 </html>
 """
@@ -1256,7 +1340,13 @@ def admin_edit(date, row):
     record = next((r for r in records if r["_row"] == row), None)
     if record is None:
         abort(404)
-    return render_template_string(EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS)
+    processes = get_process_list()
+    process_rows = split_process_rows(record)
+    other_fields = [(k, l) for k, l in TRACKER_FIELDS if k not in ("Process", "Description", "Hr")]
+    return render_template_string(
+        EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS,
+        other_fields=other_fields, processes=processes, process_rows=process_rows
+    )
 
 
 @app.route("/admin/delete/<date>/<int:row>", methods=["POST"])
