@@ -1,0 +1,976 @@
+"""
+LN Risk Map — Productivity Tracker
+------------------------------------------------
+A Flask web app for logging daily productivity / risk-map entries per
+employee and saving everything into an Excel workbook (date-named sheets).
+
+Two kinds of accounts:
+  - ADMIN (fixed credentials below): can view all dates, edit/delete any
+    entry, download the Excel workbook, and manage BOTH the employee
+    master list and the user login accounts.
+  - USERS (email + password, created by the admin): log in and fill the
+    tracker form for any employee in the master list. Users can only VIEW
+    entries (their own submissions) — no edit, delete, or download rights.
+    Note: the login email identifies who is filling the form, NOT whose
+    data is being entered — one login can be used to log data for many
+    different employees picked from the master list.
+
+Run it with:
+    pip install flask openpyxl --break-system-packages
+    python app.py
+
+Then open http://127.0.0.1:5000
+Admin login:  http://127.0.0.1:5000/admin/login
+User login:   http://127.0.0.1:5000/login
+
+Excel file created at: tracker_data/productivity_tracker.xlsx
+  - "Users" sheet   -> login accounts (Email, Password, Name)
+  - "Master" sheet  -> employee master list (Band, Emp_Id, Emp_Name,
+                        Process, Process_1, Process_2)
+  - date-named sheets -> one row per tracker entry submitted that day
+
+SECURITY NOTE: Credentials are stored/checked in plain text, which is
+fine for a small internal/local tool. If you ever deploy this somewhere
+public, swap in hashed passwords and HTTPS, and move credentials to
+environment variables (see the earlier attendance-tracker version for
+an example of reading SECRET_KEY / ADMIN_USERNAME / ADMIN_PASSWORD from
+os.environ).
+"""
+
+import os
+from datetime import datetime
+from functools import wraps
+
+from flask import (
+    Flask, render_template_string, request, redirect, url_for,
+    flash, session, send_file, abort
+)
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+DATA_FOLDER = "tracker_data"
+EXCEL_FILE = os.path.join(DATA_FOLDER, "productivity_tracker.xlsx")
+
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
+
+USERS_SHEET = "Users"
+MASTER_SHEET = "Master"
+RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, "Info"}
+
+USER_COLUMNS = ["Email", "Password", "Name"]
+MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name", "Process", "Process_1", "Process_2"]
+
+# (internal key, label shown on the form / table header)
+TRACKER_FIELDS = [
+    ("Date", "Date"),
+    ("Band", "Band"),
+    ("Emp_Id", "Emp_Id"),
+    ("Emp_Name", "Emp_Name"),
+    ("Process", "Process"),
+    ("Description", "Description"),
+    ("Process_1", "Process_1"),
+    ("Description_1", "Description_1"),
+    ("Process_2", "Process_2"),
+    ("Description_2", "Description_2"),
+    ("Other", "Other"),
+    ("Hr", "Hr"),
+    ("Other_Description", "Description"),
+    ("Logged_By", "Logged By"),
+]
+TRACKER_COLUMNS = [k for k, _ in TRACKER_FIELDS]
+
+HEADER_FILL = PatternFill(start_color="305496", end_color="305496", fill_type="solid")
+HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial")
+CELL_FONT = Font(name="Arial")
+
+
+# ---------------------------------------------------------------------------
+# Excel helpers — generic
+# ---------------------------------------------------------------------------
+def style_header(ws, columns, widths=None):
+    for col_idx, header in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center")
+    if not widths:
+        widths = [16] * len(columns)
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+
+def ensure_workbook():
+    """Create the workbook + folder + fixed sheets if they don't exist."""
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    if not os.path.exists(EXCEL_FILE):
+        wb = Workbook()
+        wb.active.title = "Info"
+        wb.active["A1"] = "LN Risk Map — Productivity Tracker. Data is stored in date-named sheets."
+        wb.save(EXCEL_FILE)
+
+    wb = load_workbook(EXCEL_FILE)
+    changed = False
+    if USERS_SHEET not in wb.sheetnames:
+        ws = wb.create_sheet(USERS_SHEET)
+        ws.append(USER_COLUMNS)
+        style_header(ws, USER_COLUMNS, [30, 18, 20])
+        changed = True
+    if MASTER_SHEET not in wb.sheetnames:
+        ws = wb.create_sheet(MASTER_SHEET)
+        ws.append(MASTER_COLUMNS)
+        style_header(ws, MASTER_COLUMNS, [10, 12, 20, 16, 16, 16])
+        changed = True
+    if changed:
+        wb.save(EXCEL_FILE)
+
+
+def get_or_create_sheet(wb, sheet_name):
+    if sheet_name in wb.sheetnames:
+        return wb[sheet_name]
+    ws = wb.create_sheet(title=sheet_name)
+    ws.append(TRACKER_COLUMNS)
+    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 12, 20, 12, 20, 12, 20, 10, 8, 20, 22])
+    return ws
+
+
+def read_sheet_rows(sheet_name, columns):
+    """Generic reader: returns list of dicts (with _row) for a fixed sheet."""
+    if not os.path.exists(EXCEL_FILE):
+        return []
+    wb = load_workbook(EXCEL_FILE, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return []
+    ws = wb[sheet_name]
+    rows = []
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row and any(row):
+            record = dict(zip(columns, row))
+            record["_row"] = row_idx
+            rows.append(record)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Users (login accounts) helpers
+# ---------------------------------------------------------------------------
+def get_users():
+    return read_sheet_rows(USERS_SHEET, USER_COLUMNS)
+
+
+def find_user_by_email(email):
+    for u in get_users():
+        if (u.get("Email") or "").strip().lower() == (email or "").strip().lower():
+            return u
+    return None
+
+
+def add_user(email, password, name):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[USERS_SHEET]
+    ws.append([email, password, name])
+    row_idx = ws.max_row
+    for col_idx in range(1, len(USER_COLUMNS) + 1):
+        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def update_user(row_idx, email, password, name):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[USERS_SHEET]
+    ws.cell(row=row_idx, column=1, value=email).font = CELL_FONT
+    ws.cell(row=row_idx, column=2, value=password).font = CELL_FONT
+    ws.cell(row=row_idx, column=3, value=name).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def delete_user(row_idx):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[USERS_SHEET]
+    ws.delete_rows(row_idx, 1)
+    wb.save(EXCEL_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Master employee list helpers
+# ---------------------------------------------------------------------------
+def get_master_list():
+    return read_sheet_rows(MASTER_SHEET, MASTER_COLUMNS)
+
+
+def add_master(data):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[MASTER_SHEET]
+    row = [data.get(c, "") for c in MASTER_COLUMNS]
+    ws.append(row)
+    row_idx = ws.max_row
+    for col_idx in range(1, len(MASTER_COLUMNS) + 1):
+        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def update_master(row_idx, data):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[MASTER_SHEET]
+    for col_idx, col in enumerate(MASTER_COLUMNS, start=1):
+        ws.cell(row=row_idx, column=col_idx, value=data.get(col, "")).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+
+
+def delete_master(row_idx):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb[MASTER_SHEET]
+    ws.delete_rows(row_idx, 1)
+    wb.save(EXCEL_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Tracker entries helpers
+# ---------------------------------------------------------------------------
+def save_entry(data: dict):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    ws = get_or_create_sheet(wb, today_str)
+
+    row = [data.get(col, "") for col in TRACKER_COLUMNS]
+    ws.append(row)
+
+    new_row_idx = ws.max_row
+    for col_idx in range(1, len(TRACKER_COLUMNS) + 1):
+        ws.cell(row=new_row_idx, column=col_idx).font = CELL_FONT
+
+    wb.save(EXCEL_FILE)
+
+
+def get_records_for_date(date_str):
+    if not os.path.exists(EXCEL_FILE):
+        return []
+    wb = load_workbook(EXCEL_FILE, data_only=True)
+    if date_str not in wb.sheetnames:
+        return []
+    ws = wb[date_str]
+    records = []
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row and any(row):
+            record = dict(zip(TRACKER_COLUMNS, row))
+            record["_row"] = row_idx
+            records.append(record)
+    return records
+
+
+def get_today_records():
+    return get_records_for_date(datetime.now().strftime("%Y-%m-%d"))
+
+
+def list_available_dates():
+    if not os.path.exists(EXCEL_FILE):
+        return []
+    wb = load_workbook(EXCEL_FILE, data_only=True)
+    dates = [name for name in wb.sheetnames if name not in RESERVED_SHEETS]
+    dates.sort(reverse=True)
+    return dates
+
+
+def update_record(date_str, row_idx, data: dict):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    if date_str not in wb.sheetnames:
+        return False
+    ws = wb[date_str]
+    for col_idx, col in enumerate(TRACKER_COLUMNS, start=1):
+        ws.cell(row=row_idx, column=col_idx, value=data.get(col, "")).font = CELL_FONT
+    wb.save(EXCEL_FILE)
+    return True
+
+
+def delete_record(date_str, row_idx):
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+    if date_str not in wb.sheetnames:
+        return False
+    ws = wb[date_str]
+    ws.delete_rows(row_idx, 1)
+    wb.save(EXCEL_FILE)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+def admin_required(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not session.get("is_admin"):
+            return redirect(url_for("admin_login"))
+        return view_func(*args, **kwargs)
+    return wrapper
+
+
+def user_required(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not session.get("user_email"):
+            return redirect(url_for("user_login"))
+        return view_func(*args, **kwargs)
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# HTML templates
+# ---------------------------------------------------------------------------
+BASE_STYLE = """
+<style>
+    body { font-family: Arial, sans-serif; max-width: 1000px; margin: 30px auto; background: #f5f6fa; color: #222; }
+    h1 { color: #2c3e50; }
+    h2 { color: #2c3e50; font-size: 18px; }
+    .card { background: #fff; padding: 24px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); margin-bottom: 24px; }
+    label { display: block; margin-top: 12px; font-weight: bold; font-size: 14px; }
+    input[type=text], input[type=date], input[type=number], input[type=password], input[type=email], select {
+        width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box;
+    }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
+    button, .btn { margin-top: 18px; padding: 10px 22px; background: #305496; color: white; border: none;
+        border-radius: 6px; font-size: 15px; cursor: pointer; text-decoration: none; display: inline-block; }
+    button:hover, .btn:hover { background: #24406f; }
+    .btn-danger { background: #b23b3b; }
+    .btn-danger:hover { background: #8f2e2e; }
+    .btn-small { padding: 5px 12px; font-size: 13px; margin: 0 4px 0 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #ddd; padding: 8px; font-size: 13px; text-align: left; }
+    th { background: #305496; color: white; }
+    .flash { padding: 10px 14px; background: #d4edda; color: #155724; border-radius: 6px; margin-bottom: 16px; }
+    .flash-error { background: #f8d7da; color: #721c24; }
+    .note { font-size: 13px; color: #555; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .topbar a { color: #305496; text-decoration: none; font-size: 14px; margin-left: 12px; }
+    .tag { display: inline-block; background: #eef1f8; color: #305496; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+</style>
+"""
+
+FLASHES = """
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for cat, m in messages %}
+      <div class="flash {% if cat == 'error' %}flash-error{% endif %}">{{ m }}</div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+"""
+
+# --- User: login -----------------------------------------------------------
+USER_LOGIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>User Login</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>👤 User Login</h1>
+    """ + FLASHES + """
+    <div class="card">
+        <p class="note">Log in with the email &amp; password given to you by your admin.
+        You may use this login to enter data for <b>any</b> employee in the list — it does not have to be your own record.</p>
+        <form method="POST">
+            <label>Email</label>
+            <input type="email" name="email" required autofocus>
+            <label>Password</label>
+            <input type="password" name="password" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('admin_login') }}">🔐 Admin login instead</a></p>
+</body>
+</html>
+"""
+
+# --- User: form + own submissions ------------------------------------------
+USER_HOME_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Productivity Tracker</title>""" + BASE_STYLE + """</head>
+<body>
+    <div class="topbar">
+        <h1>📊 LN Risk Map — Productivity Tracker</h1>
+        <div>
+            <span class="tag">Logged in as {{ user_name }} ({{ user_email }})</span>
+            <a href="{{ url_for('user_logout') }}">Log out</a>
+        </div>
+    </div>
+    """ + FLASHES + """
+
+    <div class="card">
+        <h2>New Entry</h2>
+        <form method="POST" action="{{ url_for('submit') }}">
+            <div class="row2">
+                <div>
+                    <label>Date</label>
+                    <input type="date" name="Date" value="{{ today }}" required>
+                </div>
+                <div>
+                    <label>Select Employee (from master list)</label>
+                    <select id="empSelect" onchange="fillEmp()">
+                        <option value="">-- choose employee --</option>
+                        {% for m in master %}
+                        <option value="{{ loop.index0 }}"
+                            data-band="{{ m.Band or '' }}"
+                            data-empid="{{ m.Emp_Id or '' }}"
+                            data-empname="{{ m.Emp_Name or '' }}"
+                            data-process="{{ m.Process or '' }}"
+                            data-process1="{{ m.Process_1 or '' }}"
+                            data-process2="{{ m.Process_2 or '' }}">
+                            {{ m.Emp_Id }} — {{ m.Emp_Name }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <div class="row3">
+                <div><label>Band</label><input type="text" name="Band" id="Band"></div>
+                <div><label>Emp_Id</label><input type="text" name="Emp_Id" id="Emp_Id"></div>
+                <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="Emp_Name"></div>
+            </div>
+
+            <div class="row2">
+                <div><label>Process</label><input type="text" name="Process" id="Process"></div>
+                <div><label>Description</label><input type="text" name="Description"></div>
+            </div>
+            <div class="row2">
+                <div><label>Process_1</label><input type="text" name="Process_1" id="Process_1"></div>
+                <div><label>Description_1</label><input type="text" name="Description_1"></div>
+            </div>
+            <div class="row2">
+                <div><label>Process_2</label><input type="text" name="Process_2" id="Process_2"></div>
+                <div><label>Description_2</label><input type="text" name="Description_2"></div>
+            </div>
+
+            <div class="row3">
+                <div><label>Other</label><input type="text" name="Other"></div>
+                <div><label>Hr</label><input type="number" step="0.25" name="Hr"></div>
+                <div><label>Description</label><input type="text" name="Other_Description"></div>
+            </div>
+
+            <button type="submit">Save Entry</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Your Submissions — {{ today }}</h2>
+        <p class="note">View only — contact admin for edits or corrections.</p>
+        {% if records %}
+        <table>
+            <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}</tr>
+            {% for r in records %}
+            <tr>{% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}</tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No entries submitted yet today.</p>
+        {% endif %}
+    </div>
+
+<script>
+function fillEmp() {
+    var sel = document.getElementById('empSelect');
+    var opt = sel.options[sel.selectedIndex];
+    if (!opt || !opt.value) return;
+    document.getElementById('Band').value = opt.getAttribute('data-band');
+    document.getElementById('Emp_Id').value = opt.getAttribute('data-empid');
+    document.getElementById('Emp_Name').value = opt.getAttribute('data-empname');
+    document.getElementById('Process').value = opt.getAttribute('data-process');
+    document.getElementById('Process_1').value = opt.getAttribute('data-process1');
+    document.getElementById('Process_2').value = opt.getAttribute('data-process2');
+}
+</script>
+</body>
+</html>
+"""
+
+# --- Admin: login ------------------------------------------------------------
+ADMIN_LOGIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Admin Login</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>🔐 Admin Login</h1>
+    """ + FLASHES + """
+    <div class="card">
+        <form method="POST">
+            <label>Username</label>
+            <input type="text" name="username" required autofocus>
+            <label>Password</label>
+            <input type="password" name="password" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('user_login') }}">👤 User login instead</a></p>
+</body>
+</html>
+"""
+
+# --- Admin: main panel (records) --------------------------------------------
+ADMIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Admin Panel</title>""" + BASE_STYLE + """</head>
+<body>
+    <div class="topbar">
+        <h1>🛠 Admin Panel</h1>
+        <div>
+            <a href="{{ url_for('admin_master') }}">Employee Master List</a>
+            <a href="{{ url_for('admin_users') }}">Login Accounts</a>
+            <a href="{{ url_for('admin_logout') }}">Log out</a>
+        </div>
+    </div>
+    """ + FLASHES + """
+
+    <div class="card">
+        <form method="GET" action="{{ url_for('admin_panel') }}">
+            <label>Select date</label>
+            <select name="date" onchange="this.form.submit()">
+                {% for d in dates %}
+                <option value="{{ d }}" {% if d == selected_date %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
+            </select>
+        </form>
+        <a class="btn" href="{{ url_for('download_excel') }}">⬇ Download Full Excel File</a>
+    </div>
+
+    <div class="card">
+        <h2>Records — {{ selected_date }}</h2>
+        {% if records %}
+        <table>
+            <tr>
+                {% for _, label in fields %}<th>{{ label }}</th>{% endfor %}
+                <th>Actions</th>
+            </tr>
+            {% for r in records %}
+            <tr>
+                {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
+                <td>
+                    <a class="btn btn-small" href="{{ url_for('admin_edit', date=selected_date, row=r['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('admin_delete', date=selected_date, row=r['_row']) }}"
+                          onsubmit="return confirm('Delete this record?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No records for this date.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+EDIT_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Edit Record</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>✏️ Edit Record — {{ date }}</h1>
+    <div class="card">
+        <form method="POST">
+            {% for key, label in fields %}
+            <label>{{ label }}</label>
+            <input type="text" name="{{ key }}" value="{{ record[key] or '' }}">
+            {% endfor %}
+            <button type="submit">Save Changes</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('admin_panel', date=date) }}">← Back to admin panel</a></p>
+</body>
+</html>
+"""
+
+# --- Admin: employee master list --------------------------------------------
+MASTER_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Employee Master List</title>""" + BASE_STYLE + """</head>
+<body>
+    <div class="topbar">
+        <h1>📋 Employee Master List</h1>
+        <div><a href="{{ url_for('admin_panel') }}">← Admin panel</a></div>
+    </div>
+    """ + FLASHES + """
+
+    <div class="card">
+        <h2>Add Employee</h2>
+        <form method="POST" action="{{ url_for('admin_master_add') }}">
+            <div class="row3">
+                <div><label>Band</label><input type="text" name="Band" required></div>
+                <div><label>Emp_Id</label><input type="text" name="Emp_Id" required></div>
+                <div><label>Emp_Name</label><input type="text" name="Emp_Name" required></div>
+            </div>
+            <div class="row3">
+                <div><label>Process</label><input type="text" name="Process"></div>
+                <div><label>Process_1</label><input type="text" name="Process_1"></div>
+                <div><label>Process_2</label><input type="text" name="Process_2"></div>
+            </div>
+            <button type="submit">Add to List</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Current List</h2>
+        {% if master %}
+        <table>
+            <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}<th>Actions</th></tr>
+            {% for m in master %}
+            <tr>
+                {% for c in columns %}<td>{{ m[c] }}</td>{% endfor %}
+                <td>
+                    <a class="btn btn-small" href="{{ url_for('admin_master_edit', row=m['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('admin_master_delete', row=m['_row']) }}"
+                          onsubmit="return confirm('Remove this employee from the list?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No employees added yet.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+MASTER_EDIT_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Edit Employee</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>✏️ Edit Employee</h1>
+    <div class="card">
+        <form method="POST">
+            {% for c in columns %}
+            <label>{{ c }}</label>
+            <input type="text" name="{{ c }}" value="{{ record[c] or '' }}">
+            {% endfor %}
+            <button type="submit">Save Changes</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('admin_master') }}">← Back to master list</a></p>
+</body>
+</html>
+"""
+
+# --- Admin: login accounts ---------------------------------------------------
+USERS_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Login Accounts</title>""" + BASE_STYLE + """</head>
+<body>
+    <div class="topbar">
+        <h1>👥 User Login Accounts</h1>
+        <div><a href="{{ url_for('admin_panel') }}">← Admin panel</a></div>
+    </div>
+    """ + FLASHES + """
+
+    <div class="card">
+        <h2>Add Login Account</h2>
+        <form method="POST" action="{{ url_for('admin_users_add') }}">
+            <div class="row3">
+                <div><label>Email</label><input type="email" name="Email" required></div>
+                <div><label>Password</label><input type="text" name="Password" required></div>
+                <div><label>Name</label><input type="text" name="Name" required></div>
+            </div>
+            <p class="note">"Name" identifies the person this login belongs to. It does not
+            restrict which employee's data they can fill in — that's chosen from the master list.</p>
+            <button type="submit">Add Account</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Current Accounts</h2>
+        {% if users %}
+        <table>
+            <tr><th>Email</th><th>Password</th><th>Name</th><th>Actions</th></tr>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.Email }}</td><td>{{ u.Password }}</td><td>{{ u.Name }}</td>
+                <td>
+                    <a class="btn btn-small" href="{{ url_for('admin_users_edit', row=u['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('admin_users_delete', row=u['_row']) }}"
+                          onsubmit="return confirm('Remove this login account?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No user accounts yet.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
+
+USER_EDIT_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Edit Account</title>""" + BASE_STYLE + """</head>
+<body>
+    <h1>✏️ Edit Login Account</h1>
+    <div class="card">
+        <form method="POST">
+            <label>Email</label>
+            <input type="email" name="Email" value="{{ record.Email or '' }}" required>
+            <label>Password</label>
+            <input type="text" name="Password" value="{{ record.Password or '' }}" required>
+            <label>Name</label>
+            <input type="text" name="Name" value="{{ record.Name or '' }}" required>
+            <button type="submit">Save Changes</button>
+        </form>
+    </div>
+    <p><a href="{{ url_for('admin_users') }}">← Back to accounts</a></p>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# User-facing routes
+# ---------------------------------------------------------------------------
+@app.route("/")
+def home():
+    if session.get("user_email"):
+        return redirect(url_for("user_home"))
+    return redirect(url_for("user_login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def user_login():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip()
+        password = request.form.get("password", "")
+        user = find_user_by_email(email)
+        if user and str(user.get("Password")) == password:
+            session["user_email"] = user["Email"]
+            session["user_name"] = user.get("Name") or user["Email"]
+            flash("Logged in successfully.")
+            return redirect(url_for("user_home"))
+        flash("Invalid email or password.", "error")
+    return render_template_string(USER_LOGIN_PAGE)
+
+
+@app.route("/logout")
+def user_logout():
+    session.pop("user_email", None)
+    session.pop("user_name", None)
+    return redirect(url_for("user_login"))
+
+
+@app.route("/tracker")
+@user_required
+def user_home():
+    ensure_workbook()
+    master = get_master_list()
+    records = [r for r in get_today_records() if r.get("Logged_By") == session["user_email"]]
+    today = datetime.now().strftime("%Y-%m-%d")
+    return render_template_string(
+        USER_HOME_PAGE, master=master, records=records, fields=TRACKER_FIELDS,
+        today=today, user_name=session.get("user_name"), user_email=session.get("user_email")
+    )
+
+
+@app.route("/submit", methods=["POST"])
+@user_required
+def submit():
+    data = {key: request.form.get(key, "").strip() for key, _ in TRACKER_FIELDS if key != "Logged_By"}
+    data["Logged_By"] = session["user_email"]
+    if not data.get("Date"):
+        data["Date"] = datetime.now().strftime("%Y-%m-%d")
+    save_entry(data)
+    flash(f"Saved entry for {data.get('Emp_Name') or 'employee'} ({data.get('Emp_Id')}).")
+    return redirect(url_for("user_home"))
+
+
+# ---------------------------------------------------------------------------
+# Admin: auth
+# ---------------------------------------------------------------------------
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session["is_admin"] = True
+            flash("Logged in successfully.")
+            return redirect(url_for("admin_panel"))
+        flash("Invalid username or password.", "error")
+    return render_template_string(ADMIN_LOGIN_PAGE)
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("is_admin", None)
+    return redirect(url_for("admin_login"))
+
+
+# ---------------------------------------------------------------------------
+# Admin: tracker records
+# ---------------------------------------------------------------------------
+@app.route("/admin")
+@admin_required
+def admin_panel():
+    ensure_workbook()
+    dates = list_available_dates()
+    today = datetime.now().strftime("%Y-%m-%d")
+    selected_date = request.args.get("date") or (dates[0] if dates else today)
+    records = get_records_for_date(selected_date)
+    return render_template_string(
+        ADMIN_PAGE, dates=dates, selected_date=selected_date,
+        records=records, fields=TRACKER_FIELDS
+    )
+
+
+@app.route("/admin/edit/<date>/<int:row>", methods=["GET", "POST"])
+@admin_required
+def admin_edit(date, row):
+    if request.method == "POST":
+        data = {key: request.form.get(key, "").strip() for key, _ in TRACKER_FIELDS}
+        if update_record(date, row, data):
+            flash("Record updated.")
+        else:
+            flash("Could not update record — sheet not found.", "error")
+        return redirect(url_for("admin_panel", date=date))
+
+    records = get_records_for_date(date)
+    record = next((r for r in records if r["_row"] == row), None)
+    if record is None:
+        abort(404)
+    return render_template_string(EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS)
+
+
+@app.route("/admin/delete/<date>/<int:row>", methods=["POST"])
+@admin_required
+def admin_delete(date, row):
+    if delete_record(date, row):
+        flash("Record deleted.")
+    else:
+        flash("Could not delete record — sheet not found.", "error")
+    return redirect(url_for("admin_panel", date=date))
+
+
+@app.route("/admin/download")
+@admin_required
+def download_excel():
+    ensure_workbook()
+    return send_file(EXCEL_FILE, as_attachment=True, download_name="productivity_tracker.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# Admin: employee master list
+# ---------------------------------------------------------------------------
+@app.route("/admin/master")
+@admin_required
+def admin_master():
+    ensure_workbook()
+    return render_template_string(MASTER_PAGE, master=get_master_list(), columns=MASTER_COLUMNS)
+
+
+@app.route("/admin/master/add", methods=["POST"])
+@admin_required
+def admin_master_add():
+    data = {c: request.form.get(c, "").strip() for c in MASTER_COLUMNS}
+    add_master(data)
+    flash(f"Added {data.get('Emp_Name')} to the master list.")
+    return redirect(url_for("admin_master"))
+
+
+@app.route("/admin/master/edit/<int:row>", methods=["GET", "POST"])
+@admin_required
+def admin_master_edit(row):
+    if request.method == "POST":
+        data = {c: request.form.get(c, "").strip() for c in MASTER_COLUMNS}
+        update_master(row, data)
+        flash("Employee updated.")
+        return redirect(url_for("admin_master"))
+    record = next((m for m in get_master_list() if m["_row"] == row), None)
+    if record is None:
+        abort(404)
+    return render_template_string(MASTER_EDIT_PAGE, record=record, columns=MASTER_COLUMNS)
+
+
+@app.route("/admin/master/delete/<int:row>", methods=["POST"])
+@admin_required
+def admin_master_delete(row):
+    delete_master(row)
+    flash("Employee removed from master list.")
+    return redirect(url_for("admin_master"))
+
+
+# ---------------------------------------------------------------------------
+# Admin: user login accounts
+# ---------------------------------------------------------------------------
+@app.route("/admin/users")
+@admin_required
+def admin_users():
+    ensure_workbook()
+    return render_template_string(USERS_PAGE, users=get_users())
+
+
+@app.route("/admin/users/add", methods=["POST"])
+@admin_required
+def admin_users_add():
+    email = request.form.get("Email", "").strip()
+    password = request.form.get("Password", "").strip()
+    name = request.form.get("Name", "").strip()
+    if find_user_by_email(email):
+        flash("An account with that email already exists.", "error")
+    else:
+        add_user(email, password, name)
+        flash(f"Created login for {name} ({email}).")
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/edit/<int:row>", methods=["GET", "POST"])
+@admin_required
+def admin_users_edit(row):
+    if request.method == "POST":
+        email = request.form.get("Email", "").strip()
+        password = request.form.get("Password", "").strip()
+        name = request.form.get("Name", "").strip()
+        update_user(row, email, password, name)
+        flash("Account updated.")
+        return redirect(url_for("admin_users"))
+    record = next((u for u in get_users() if u["_row"] == row), None)
+    if record is None:
+        abort(404)
+    return render_template_string(USER_EDIT_PAGE, record=record)
+
+
+@app.route("/admin/users/delete/<int:row>", methods=["POST"])
+@admin_required
+def admin_users_delete(row):
+    delete_user(row)
+    flash("Account removed.")
+    return redirect(url_for("admin_users"))
+
+
+# ---------------------------------------------------------------------------
+ensure_workbook()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
