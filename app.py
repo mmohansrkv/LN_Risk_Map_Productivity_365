@@ -374,6 +374,16 @@ def list_available_dates():
     return dates
 
 
+def list_available_months():
+    """Distinct 'YYYY-MM' prefixes across all date-named sheets, newest first.
+    Used to populate the monthly-download dropdown in the admin panel."""
+    months = sorted(
+        {d[:7] for d in list_available_dates() if len(d) >= 7},
+        reverse=True,
+    )
+    return months
+
+
 def update_record(date_str, row_idx, data: dict):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
@@ -1050,6 +1060,19 @@ ADMIN_PAGE = """
             </select>
         </form>
         <a class="btn" href="{{ url_for('download_excel') }}">⬇ Download Full Excel File</a>
+
+        {% if months %}
+        <form method="GET" action="{{ url_for('admin_panel') }}" style="display:inline">
+            <input type="hidden" name="date" value="{{ selected_date }}">
+            <label>Select month</label>
+            <select name="month" onchange="this.form.submit()">
+                {% for m in months %}
+                <option value="{{ m }}" {% if m == selected_month %}selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+            </select>
+        </form>
+        <a class="btn" href="{{ url_for('download_excel_month', month=selected_month) }}">⬇ Download Month's Excel File</a>
+        {% endif %}
     </div>
 
     <div class="card">
@@ -1607,9 +1630,12 @@ def admin_panel():
     for r in records:
         r["_subrows"] = expand_record_rows(r, target_lookup)
     user_counts = entry_counts_by_user(records)
+    months = list_available_months()
+    selected_month = request.args.get("month") or (months[0] if months else "")
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
-        records=records, fields=TRACKER_FIELDS, user_counts=user_counts
+        records=records, fields=TRACKER_FIELDS, user_counts=user_counts,
+        months=months, selected_month=selected_month
     )
 
 
@@ -1663,6 +1689,35 @@ def download_excel():
     buf.seek(0)
     return send_file(
         buf, as_attachment=True, download_name="productivity_tracker.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+@app.route("/admin/download/month/<month>")
+@admin_required
+def download_excel_month(month):
+    """Download a workbook containing only one month's date sheets (e.g.
+    month='2026-09'). Master/Process_List/Info are kept for reference; Users
+    (login emails/passwords) is stripped, same as the full download."""
+    ensure_workbook()
+    wb = load_workbook(EXCEL_FILE)
+
+    if USERS_SHEET in wb.sheetnames:
+        del wb[USERS_SHEET]
+
+    keep_always = {MASTER_SHEET, PROCESS_SHEET, "Info"}
+    for name in list(wb.sheetnames):
+        if name in keep_always:
+            continue
+        if not name.startswith(month):
+            del wb[name]
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf, as_attachment=True,
+        download_name=f"productivity_tracker_{month}.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
