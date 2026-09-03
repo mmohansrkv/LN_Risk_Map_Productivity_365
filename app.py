@@ -42,6 +42,7 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from flask import (
     Flask, render_template_string, request, redirect, url_for,
@@ -65,6 +66,17 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
 
 WORK_HOURS_PER_DAY = 8.0
 LEAVE_HR = 8.0  # Hr auto-filled when a user checks "On Leave today"
+
+# The server may run in a different timezone than the users (e.g. hosting
+# providers default to UTC). All dates/times shown or logged in the app use
+# this timezone instead of the server's local time, so "Login: 10:10:29"
+# matches what the clock on the user's wall actually says.
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
+
+
+def now():
+    """Current datetime in APP_TIMEZONE (IST by default), not server-local time."""
+    return datetime.now(ZoneInfo(APP_TIMEZONE))
 
 # SMTP settings for the 3:00 PM "you haven't filled 8 hrs today" reminder.
 # If SMTP_SERVER isn't set, reminder emails are skipped (logged only) so the
@@ -301,7 +313,7 @@ def delete_process(row_idx):
 def save_entry(data: dict):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now().strftime("%Y-%m-%d")
     ws = get_or_create_sheet(wb, today_str)
 
     row = [data.get(col, "") for col in TRACKER_COLUMNS]
@@ -331,7 +343,7 @@ def get_records_for_date(date_str):
 
 
 def get_today_records():
-    return get_records_for_date(datetime.now().strftime("%Y-%m-%d"))
+    return get_records_for_date(now().strftime("%Y-%m-%d"))
 
 
 def list_available_dates():
@@ -375,8 +387,8 @@ def add_login_log(email, name):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[LOGIN_LOG_SHEET]
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    login_time = datetime.now().strftime("%H:%M:%S")
+    today_str = now().strftime("%Y-%m-%d")
+    login_time = now().strftime("%H:%M:%S")
     ws.append([today_str, email, name, login_time, ""])
     row_idx = ws.max_row
     for col_idx in range(1, len(LOGIN_LOG_COLUMNS) + 1):
@@ -393,13 +405,13 @@ def set_logout_log(row_idx):
     wb = load_workbook(EXCEL_FILE)
     ws = wb[LOGIN_LOG_SHEET]
     if row_idx <= ws.max_row:
-        logout_time = datetime.now().strftime("%H:%M:%S")
+        logout_time = now().strftime("%H:%M:%S")
         ws.cell(row=row_idx, column=5, value=logout_time).font = CELL_FONT
         wb.save(EXCEL_FILE)
 
 
 def get_login_log_for_user_today(email):
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now().strftime("%Y-%m-%d")
     rows = read_sheet_rows(LOGIN_LOG_SHEET, LOGIN_LOG_COLUMNS)
     return [r for r in rows if r.get("Email") == email and r.get("Date") == today_str]
 
@@ -481,7 +493,7 @@ def send_daily_pending_hr_reminders():
     8 hr/day target (or nothing was filled at all), email that account's
     login address a reminder."""
     ensure_workbook()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now().strftime("%Y-%m-%d")
     today_records = get_records_for_date(today)
     for user in get_users():
         email = user.get("Email")
@@ -511,7 +523,7 @@ def _start_reminder_scheduler():
         print("[reminder] apscheduler not installed — daily 3:00 PM reminder disabled. "
               "Run `pip install apscheduler` to enable it.")
         return
-    scheduler = BackgroundScheduler(daemon=True)
+    scheduler = BackgroundScheduler(daemon=True, timezone=ZoneInfo(APP_TIMEZONE))
     scheduler.add_job(
         send_daily_pending_hr_reminders,
         "cron", hour=REMINDER_HOUR, minute=REMINDER_MINUTE,
@@ -1189,7 +1201,7 @@ def user_login():
             session["user_email"] = user["Email"]
             session["user_name"] = user.get("Name") or user["Email"]
             session["login_log_row"] = add_login_log(session["user_email"], session["user_name"])
-            session["login_time"] = datetime.now().strftime("%H:%M:%S")
+            session["login_time"] = now().strftime("%H:%M:%S")
             flash("Logged in successfully.")
             return redirect(url_for("user_home"))
         flash("Invalid email or password.", "error")
@@ -1213,7 +1225,7 @@ def user_home():
     master = get_master_list()
     processes = get_process_list()
     records = [r for r in get_today_records() if r.get("Logged_By") == session["user_email"]]
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now().strftime("%Y-%m-%d")
     total_hr = total_hr_for_records(records)
     pending_hr = pending_hr_for_records(records)
     login_log = get_login_log_for_user_today(session["user_email"])
@@ -1231,7 +1243,7 @@ def submit():
     data = {key: request.form.get(key, "").strip() for key, _ in TRACKER_FIELDS if key != "Logged_By"}
     data["Logged_By"] = session["user_email"]
     if not data.get("Date"):
-        data["Date"] = datetime.now().strftime("%Y-%m-%d")
+        data["Date"] = now().strftime("%Y-%m-%d")
     save_entry(data)
     flash(f"Saved entry for {data.get('Emp_Name') or 'employee'} ({data.get('Emp_Id')}).")
     return redirect(url_for("user_home"))
@@ -1267,7 +1279,7 @@ def admin_logout():
 def admin_panel():
     ensure_workbook()
     dates = list_available_dates()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date") or (dates[0] if dates else today)
     records = get_records_for_date(selected_date)
     user_counts = entry_counts_by_user(records)
@@ -1310,7 +1322,7 @@ def admin_delete(date, row):
 def admin_login_log():
     ensure_workbook()
     dates = list_login_log_dates()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date") or (dates[0] if dates else today)
     logs = get_login_log_for_date(selected_date)
     return render_template_string(LOGIN_LOG_PAGE, dates=dates, selected_date=selected_date, logs=logs)
