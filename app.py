@@ -92,13 +92,11 @@ REMINDER_MINUTE = int(os.environ.get("REMINDER_MINUTE", "0"))
 USERS_SHEET = "Users"
 MASTER_SHEET = "Master"
 PROCESS_SHEET = "Process_List"
-LOGIN_LOG_SHEET = "Login_Log"
-RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, PROCESS_SHEET, LOGIN_LOG_SHEET, "Info"}
+RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, PROCESS_SHEET, "Info"}
 
 USER_COLUMNS = ["Email", "Password", "Name"]
 MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name"]
 PROCESS_COLUMNS = ["Process"]
-LOGIN_LOG_COLUMNS = ["Date", "Email", "Name", "Login_Time", "Logout_Time"]
 
 # (internal key, label shown on the form / table header)
 TRACKER_FIELDS = [
@@ -160,11 +158,6 @@ def ensure_workbook():
         ws = wb.create_sheet(PROCESS_SHEET)
         ws.append(PROCESS_COLUMNS)
         style_header(ws, PROCESS_COLUMNS, [30])
-        changed = True
-    if LOGIN_LOG_SHEET not in wb.sheetnames:
-        ws = wb.create_sheet(LOGIN_LOG_SHEET)
-        ws.append(LOGIN_LOG_COLUMNS)
-        style_header(ws, LOGIN_LOG_COLUMNS, [14, 30, 18, 18, 18])
         changed = True
     if changed:
         wb.save(EXCEL_FILE)
@@ -379,54 +372,6 @@ def delete_record(date_str, row_idx):
 
 
 # ---------------------------------------------------------------------------
-# Login / logout time log helpers
-# ---------------------------------------------------------------------------
-def add_login_log(email, name):
-    """Record a login event for today and return the new row index so the
-    matching logout time can be written back to the same row later."""
-    ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[LOGIN_LOG_SHEET]
-    today_str = now().strftime("%Y-%m-%d")
-    login_time = now().strftime("%H:%M:%S")
-    ws.append([today_str, email, name, login_time, ""])
-    row_idx = ws.max_row
-    for col_idx in range(1, len(LOGIN_LOG_COLUMNS) + 1):
-        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    wb.save(EXCEL_FILE)
-    return row_idx
-
-
-def set_logout_log(row_idx):
-    """Write the logout time into the row created by add_login_log."""
-    if not row_idx:
-        return
-    ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[LOGIN_LOG_SHEET]
-    if row_idx <= ws.max_row:
-        logout_time = now().strftime("%H:%M:%S")
-        ws.cell(row=row_idx, column=5, value=logout_time).font = CELL_FONT
-        wb.save(EXCEL_FILE)
-
-
-def get_login_log_for_user_today(email):
-    today_str = now().strftime("%Y-%m-%d")
-    rows = read_sheet_rows(LOGIN_LOG_SHEET, LOGIN_LOG_COLUMNS)
-    return [r for r in rows if r.get("Email") == email and r.get("Date") == today_str]
-
-
-def get_login_log_for_date(date_str):
-    rows = read_sheet_rows(LOGIN_LOG_SHEET, LOGIN_LOG_COLUMNS)
-    return [r for r in rows if r.get("Date") == date_str]
-
-
-def list_login_log_dates():
-    rows = read_sheet_rows(LOGIN_LOG_SHEET, LOGIN_LOG_COLUMNS)
-    dates = sorted({r.get("Date") for r in rows if r.get("Date")}, reverse=True)
-    return dates
-
-
 # ---------------------------------------------------------------------------
 # Hours worked / pending helpers
 # ---------------------------------------------------------------------------
@@ -452,6 +397,30 @@ def total_hr_for_records(records):
 
 def pending_hr_for_records(records):
     return max(0.0, WORK_HOURS_PER_DAY - total_hr_for_records(records))
+
+
+def process_breakdown(record):
+    """Split a record's ';'-joined Process and Hr strings into a list of
+    {process, hr, pct} dicts, where pct is that process's share of the
+    entry's own total hours. Admin-only display."""
+    procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
+    hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
+    items = []
+    total = 0.0
+    parsed_hrs = []
+    for h in hrs:
+        try:
+            parsed_hrs.append(float(h)) if h else parsed_hrs.append(0.0)
+        except ValueError:
+            parsed_hrs.append(0.0)
+    total = sum(parsed_hrs)
+    for i, proc in enumerate(procs):
+        if not proc:
+            continue
+        hr = parsed_hrs[i] if i < len(parsed_hrs) else 0.0
+        pct = round((hr / total) * 100) if total > 0 else 0
+        items.append({"process": proc, "hr": hr, "pct": pct})
+    return items
 
 
 def entry_counts_by_user(records):
@@ -629,7 +598,6 @@ USER_HOME_PAGE = """
         <h1>📊 LN Risk Map — Productivity Tracker</h1>
         <div>
             <span class="tag">Logged in as {{ user_name }} ({{ user_email }})</span>
-            {% if login_time %}<span class="tag">Login: {{ login_time }}</span>{% endif %}
             <a href="{{ url_for('user_logout') }}">Log out</a>
         </div>
     </div>
@@ -712,23 +680,6 @@ USER_HOME_PAGE = """
                 Pending: {{ '%g'|format(pending_hr) }} hr
             </span></div>
         </div>
-    </div>
-
-    <div class="card">
-        <h2>Login / Logout Time — {{ today }}</h2>
-        {% if login_log %}
-        <table>
-            <tr><th>Login Time</th><th>Logout Time</th></tr>
-            {% for l in login_log %}
-            <tr>
-                <td>{{ l.Login_Time or '-' }}</td>
-                <td>{{ l.Logout_Time or 'Still logged in' }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <p>No login activity recorded yet today.</p>
-        {% endif %}
     </div>
 
     <div class="card">
@@ -839,7 +790,6 @@ ADMIN_PAGE = """
             <a href="{{ url_for('admin_master') }}">Employee Master List</a>
             <a href="{{ url_for('admin_process') }}">Process List</a>
             <a href="{{ url_for('admin_users') }}">Login Accounts</a>
-            <a href="{{ url_for('admin_login_log') }}">Login/Logout Log</a>
             <a href="{{ url_for('admin_logout') }}">Log out</a>
         </div>
     </div>
@@ -882,11 +832,17 @@ ADMIN_PAGE = """
         <table>
             <tr>
                 {% for _, label in fields %}<th>{{ label }}</th>{% endfor %}
+                <th>Process %</th>
                 <th>Actions</th>
             </tr>
             {% for r in records %}
             <tr>
                 {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
+                <td>
+                    {% for b in r._breakdown %}
+                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if not loop.last %}<br>{% endif %}
+                    {% endfor %}
+                </td>
                 <td>
                     <a class="btn btn-small" href="{{ url_for('admin_edit', date=selected_date, row=r['_row']) }}">Edit</a>
                     <form style="display:inline" method="POST" action="{{ url_for('admin_delete', date=selected_date, row=r['_row']) }}"
@@ -1135,52 +1091,6 @@ USER_EDIT_PAGE = """
 </html>
 """
 
-# --- Admin: login / logout log ----------------------------------------------
-LOGIN_LOG_PAGE = """
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Login/Logout Log</title>""" + BASE_STYLE + """</head>
-<body>
-    <div class="topbar">
-        <h1>🕒 Login / Logout Log</h1>
-        <div><a href="{{ url_for('admin_panel') }}">← Admin panel</a></div>
-    </div>
-    """ + FLASHES + """
-
-    <div class="card">
-        <form method="GET" action="{{ url_for('admin_login_log') }}">
-            <label>Select date</label>
-            <select name="date" onchange="this.form.submit()">
-                {% for d in dates %}
-                <option value="{{ d }}" {% if d == selected_date %}selected{% endif %}>{{ d }}</option>
-                {% endfor %}
-            </select>
-        </form>
-    </div>
-
-    <div class="card">
-        <h2>Log — {{ selected_date }}</h2>
-        {% if logs %}
-        <table>
-            <tr><th>Email</th><th>Name</th><th>Login Time</th><th>Logout Time</th></tr>
-            {% for l in logs %}
-            <tr>
-                <td>{{ l.Email }}</td>
-                <td>{{ l.Name }}</td>
-                <td>{{ l.Login_Time or '-' }}</td>
-                <td>{{ l.Logout_Time or 'Still logged in' }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <p>No login activity for this date.</p>
-        {% endif %}
-    </div>
-</body>
-</html>
-"""
-
-
 # ---------------------------------------------------------------------------
 # User-facing routes
 # ---------------------------------------------------------------------------
@@ -1200,8 +1110,6 @@ def user_login():
         if user and str(user.get("Password")) == password:
             session["user_email"] = user["Email"]
             session["user_name"] = user.get("Name") or user["Email"]
-            session["login_log_row"] = add_login_log(session["user_email"], session["user_name"])
-            session["login_time"] = now().strftime("%H:%M:%S")
             flash("Logged in successfully.")
             return redirect(url_for("user_home"))
         flash("Invalid email or password.", "error")
@@ -1210,11 +1118,8 @@ def user_login():
 
 @app.route("/logout")
 def user_logout():
-    set_logout_log(session.get("login_log_row"))
     session.pop("user_email", None)
     session.pop("user_name", None)
-    session.pop("login_log_row", None)
-    session.pop("login_time", None)
     return redirect(url_for("user_login"))
 
 
@@ -1228,12 +1133,10 @@ def user_home():
     today = now().strftime("%Y-%m-%d")
     total_hr = total_hr_for_records(records)
     pending_hr = pending_hr_for_records(records)
-    login_log = get_login_log_for_user_today(session["user_email"])
     return render_template_string(
         USER_HOME_PAGE, master=master, processes=processes, records=records, fields=TRACKER_FIELDS,
         today=today, user_name=session.get("user_name"), user_email=session.get("user_email"),
-        total_hr=total_hr, pending_hr=pending_hr, target_hr=WORK_HOURS_PER_DAY,
-        login_time=session.get("login_time"), login_log=login_log, leave_hr=LEAVE_HR
+        total_hr=total_hr, pending_hr=pending_hr, target_hr=WORK_HOURS_PER_DAY, leave_hr=LEAVE_HR
     )
 
 
@@ -1282,6 +1185,8 @@ def admin_panel():
     today = now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date") or (dates[0] if dates else today)
     records = get_records_for_date(selected_date)
+    for r in records:
+        r["_breakdown"] = process_breakdown(r)
     user_counts = entry_counts_by_user(records)
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
@@ -1315,17 +1220,6 @@ def admin_delete(date, row):
     else:
         flash("Could not delete record — sheet not found.", "error")
     return redirect(url_for("admin_panel", date=date))
-
-
-@app.route("/admin/login-log")
-@admin_required
-def admin_login_log():
-    ensure_workbook()
-    dates = list_login_log_dates()
-    today = now().strftime("%Y-%m-%d")
-    selected_date = request.args.get("date") or (dates[0] if dates else today)
-    logs = get_login_log_for_date(selected_date)
-    return render_template_string(LOGIN_LOG_PAGE, dates=dates, selected_date=selected_date, logs=logs)
 
 
 @app.route("/admin/download")
