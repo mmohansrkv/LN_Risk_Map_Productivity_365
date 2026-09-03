@@ -10,8 +10,9 @@ Two kinds of accounts:
     list, the process list, and user login accounts.
   - USERS (email + password, created by the admin): log in and fill the
     tracker form for any employee in the master list, picking a Process
-    from the admin-maintained process list. Users can only VIEW entries
-    (their own submissions) — no edit, delete, or download rights.
+    from the admin-maintained process list. Users can view, edit, and
+    delete their own submissions for the current day (no download rights,
+    and they cannot edit/delete other users' entries).
     Note: the login email identifies who is filling the form, NOT whose
     data is being entered — one login can be used to log data for many
     different employees picked from the master list.
@@ -806,12 +807,21 @@ USER_HOME_PAGE = """
 
     <div class="card">
         <h2>Your Submissions — {{ today }}</h2>
-        <p class="note">View only — contact admin for edits or corrections.</p>
+        <p class="note">You can edit or delete entries you submitted today.</p>
         {% if records %}
         <table>
-            <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}</tr>
+            <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}<th>Actions</th></tr>
             {% for r in records %}
-            <tr>{% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}</tr>
+            <tr>
+                {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
+                <td>
+                    <a class="btn btn-small" href="{{ url_for('user_edit', date=today, row=r['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('user_delete', date=today, row=r['_row']) }}"
+                          onsubmit="return confirm('Delete this entry?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
+                </td>
+            </tr>
             {% endfor %}
         </table>
         {% else %}
@@ -1026,12 +1036,13 @@ EDIT_PAGE = """
                 {% for row in process_rows %}
                 <div class="row4 process-row">
                     <div>
-                        <select class="proc-select">
+                        <select class="proc-select" onchange="updateProcTarget(this)">
                             <option value="">-- select process --</option>
                             {% for p in processes %}
-                            <option value="{{ p.Process }}" {% if p.Process == row.Process %}selected{% endif %}>{{ p.Process }}</option>
+                            <option value="{{ p.Process }}" data-target-hr="{{ p.Target_Hr or '' }}" data-target-pct="{{ p.Target_Pct or '' }}" data-target-count-hr="{{ p.Target_Count_Hr or '' }}" {% if p.Process == row.Process %}selected{% endif %}>{{ p.Process }}</option>
                             {% endfor %}
                         </select>
+                        <div class="proc-target note"></div>
                     </div>
                     <div><input type="text" class="proc-desc" placeholder="Description" value="{{ row.Description }}"></div>
                     <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr" value="{{ row.Hr }}"></div>
@@ -1046,14 +1057,35 @@ EDIT_PAGE = """
             <input type="hidden" name="Count" id="Count_hidden">
 
             <label>Logged By</label>
+            {% if logged_by_readonly %}
+            <input type="text" value="{{ record.Logged_By or '' }}" readonly style="background:var(--canvas);">
+            <input type="hidden" name="Logged_By" value="{{ record.Logged_By or '' }}">
+            {% else %}
             <input type="text" name="Logged_By" value="{{ record.Logged_By or '' }}">
+            {% endif %}
 
             <button type="submit">Save Changes</button>
         </form>
     </div>
-    <p><a href="{{ url_for('admin_panel', date=date) }}">← Back to admin panel</a></p>
+    <p><a href="{{ back_url }}">← {{ back_label }}</a></p>
 
 <script>
+function updateProcTarget(select) {
+    var opt = select.options[select.selectedIndex];
+    var targetDiv = select.parentElement.querySelector('.proc-target');
+    var hr = opt.getAttribute('data-target-hr');
+    var pct = opt.getAttribute('data-target-pct');
+    var countHr = opt.getAttribute('data-target-count-hr');
+    if (opt.value && (hr || pct || countHr)) {
+        var parts = [];
+        if (hr || pct) parts.push((hr || '-') + ' hr / ' + (pct || '-') + '%');
+        if (countHr) parts.push(countHr + ' /hr target');
+        targetDiv.textContent = 'Target: ' + parts.join(' · ');
+    } else {
+        targetDiv.textContent = '';
+    }
+}
+
 function addProcessRow() {
     var container = document.getElementById('processRows');
     var row = container.children[0].cloneNode(true);
@@ -1061,8 +1093,11 @@ function addProcessRow() {
     row.querySelector('.proc-desc').value = '';
     row.querySelector('.proc-hr').value = '';
     row.querySelector('.proc-count').value = '';
+    row.querySelector('.proc-target').textContent = '';
     container.appendChild(row);
 }
+
+document.querySelectorAll('#processRows .proc-select').forEach(updateProcTarget);
 
 function collectProcessRows() {
     var selects = document.querySelectorAll('#processRows .proc-select');
@@ -1380,6 +1415,56 @@ def submit():
     return redirect(url_for("user_home"))
 
 
+@app.route("/my/edit/<date>/<int:row>", methods=["GET", "POST"])
+@user_required
+def user_edit(date, row):
+    """Same edit flow as admin_edit, but a user may only edit their own
+    submissions (Logged_By must match the logged-in user's email)."""
+    records = get_records_for_date(date)
+    record = next((r for r in records if r["_row"] == row), None)
+    if record is None:
+        abort(404)
+    if record.get("Logged_By") != session["user_email"]:
+        abort(403)
+
+    if request.method == "POST":
+        data = {key: request.form.get(key, "").strip() for key, _ in TRACKER_FIELDS}
+        data["Logged_By"] = session["user_email"]  # can't be reassigned to someone else
+        if update_record(date, row, data):
+            flash("Entry updated.")
+        else:
+            flash("Could not update entry — sheet not found.", "error")
+        return redirect(url_for("user_home"))
+
+    processes = get_process_list()
+    process_rows = split_process_rows(record)
+    other_fields = [(k, l) for k, l in TRACKER_FIELDS if k not in ("Process", "Description", "Hr", "Count")]
+    return render_template_string(
+        EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS,
+        other_fields=other_fields, processes=processes, process_rows=process_rows,
+        back_url=url_for("user_home"), back_label="Back to your entries",
+        logged_by_readonly=True
+    )
+
+
+@app.route("/my/delete/<date>/<int:row>", methods=["POST"])
+@user_required
+def user_delete(date, row):
+    """Same delete flow as admin_delete, but restricted to the user's own
+    submissions."""
+    records = get_records_for_date(date)
+    record = next((r for r in records if r["_row"] == row), None)
+    if record is None:
+        abort(404)
+    if record.get("Logged_By") != session["user_email"]:
+        abort(403)
+    if delete_record(date, row):
+        flash("Entry deleted.")
+    else:
+        flash("Could not delete entry — sheet not found.", "error")
+    return redirect(url_for("user_home"))
+
+
 # ---------------------------------------------------------------------------
 # Admin: auth
 # ---------------------------------------------------------------------------
@@ -1443,7 +1528,9 @@ def admin_edit(date, row):
     other_fields = [(k, l) for k, l in TRACKER_FIELDS if k not in ("Process", "Description", "Hr", "Count")]
     return render_template_string(
         EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS,
-        other_fields=other_fields, processes=processes, process_rows=process_rows
+        other_fields=other_fields, processes=processes, process_rows=process_rows,
+        back_url=url_for("admin_panel", date=date), back_label="Back to admin panel",
+        logged_by_readonly=False
     )
 
 
