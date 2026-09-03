@@ -568,32 +568,51 @@ def user_required(view_func):
 # HTML templates
 # ---------------------------------------------------------------------------
 BASE_STYLE = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-    body { font-family: Arial, sans-serif; max-width: 1000px; margin: 30px auto; background: #f5f6fa; color: #222; }
-    h1 { color: #2c3e50; }
-    h2 { color: #2c3e50; font-size: 18px; }
-    .card { background: #fff; padding: 24px; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); margin-bottom: 24px; }
-    label { display: block; margin-top: 12px; font-weight: bold; font-size: 14px; }
-    input[type=text], input[type=date], input[type=number], input[type=password], input[type=email], select {
-        width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box;
+    :root {
+        --ink: #1b2430; --ink-soft: #5b6472; --line: #dfe3ea;
+        --primary: #2c4a80; --primary-dark: #1f3660; --primary-tint: #eef2f9;
+        --amber: #b8860b; --amber-tint: #fdf6e3;
+        --green: #1e7a4c; --green-tint: #e9f7ef;
+        --red: #b0362c; --red-tint: #fbeae8;
+        --surface: #ffffff; --canvas: #f2f4f8;
     }
+    * { box-sizing: border-box; }
+    body { font-family: 'Inter', Arial, sans-serif; max-width: 1000px; margin: 28px auto; background: var(--canvas); color: var(--ink); }
+    h1 { font-family: 'Manrope', Arial, sans-serif; font-weight: 800; color: var(--primary-dark); letter-spacing: -0.01em; margin: 0; }
+    h2 { font-family: 'Manrope', Arial, sans-serif; font-weight: 700; color: var(--ink); font-size: 16px; margin: 0 0 4px; }
+    .card { background: var(--surface); padding: 22px 24px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 20px; }
+    .card-section { border-left: 3px solid var(--primary); padding-left: 18px; margin-top: 18px; }
+    .card-section:first-of-type { margin-top: 4px; }
+    .section-title { font-family: 'Manrope', Arial, sans-serif; font-weight: 700; font-size: 13px; color: var(--primary-dark);
+        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
+    label { display: block; margin-top: 12px; font-weight: 600; font-size: 13.5px; color: var(--ink-soft); }
+    input[type=text], input[type=date], input[type=number], input[type=password], input[type=email], select {
+        width: 100%; padding: 9px 10px; margin-top: 5px; border: 1px solid var(--line); border-radius: 6px;
+        box-sizing: border-box; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: var(--ink); background: #fff;
+    }
+    input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); }
     .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
     .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
-    button, .btn { margin-top: 18px; padding: 10px 22px; background: #305496; color: white; border: none;
-        border-radius: 6px; font-size: 15px; cursor: pointer; text-decoration: none; display: inline-block; }
-    button:hover, .btn:hover { background: #24406f; }
-    .btn-danger { background: #b23b3b; }
+    button, .btn { margin-top: 18px; padding: 10px 22px; background: var(--primary); color: white; border: none;
+        border-radius: 6px; font-size: 14.5px; font-weight: 600; cursor: pointer; text-decoration: none; display: inline-block;
+        font-family: 'Inter', Arial, sans-serif; }
+    button:hover, .btn:hover { background: var(--primary-dark); }
+    .btn-danger { background: var(--red); }
     .btn-danger:hover { background: #8f2e2e; }
     .btn-small { padding: 5px 12px; font-size: 13px; margin: 0 4px 0 0; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { border: 1px solid #ddd; padding: 8px; font-size: 13px; text-align: left; }
-    th { background: #305496; color: white; }
-    .flash { padding: 10px 14px; background: #d4edda; color: #155724; border-radius: 6px; margin-bottom: 16px; }
-    .flash-error { background: #f8d7da; color: #721c24; }
-    .note { font-size: 13px; color: #555; }
-    .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-    .topbar a { color: #305496; text-decoration: none; font-size: 14px; margin-left: 12px; }
-    .tag { display: inline-block; background: #eef1f8; color: #305496; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+    th, td { border: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: left; }
+    th { background: var(--primary-tint); color: var(--primary-dark); font-weight: 700; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .flash { padding: 10px 14px; background: var(--green-tint); color: var(--green); border-radius: 6px; margin-bottom: 16px; font-weight: 500; }
+    .flash-error { background: var(--red-tint); color: var(--red); }
+    .note { font-size: 13px; color: var(--ink-soft); }
+    .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 22px; margin-bottom: 20px; }
+    .topbar a { color: var(--primary); text-decoration: none; font-size: 14px; margin-left: 12px; font-weight: 600; }
+    .tag { display: inline-block; background: var(--primary-tint); color: var(--primary-dark); padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
     body.login-page { max-width: 380px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
         justify-content: center; padding: 16px; }
     body.login-page h1 { text-align: center; font-size: 20px; margin: 0 0 14px; }
@@ -651,89 +670,113 @@ USER_HOME_PAGE = """
     </div>
     """ + FLASHES + """
 
+    {% if processes %}
+    <div class="card">
+        <h2>Process Targets</h2>
+        <p class="note">Daily target hours and share for each process.</p>
+        <table>
+            <tr><th>Process</th><th>Target Hr</th><th>Target %</th></tr>
+            {% for p in processes %}
+            <tr>
+                <td>{{ p.Process }}</td>
+                <td>{{ p.Target_Hr or '-' }}</td>
+                <td>{{ p.Target_Pct or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+
     <div class="card">
         <h2>New Entry</h2>
         <form method="POST" action="{{ url_for('submit') }}">
-            <div class="row2">
-                <div>
-                    <label>Date</label>
-                    <input type="date" name="Date" value="{{ today }}" required>
+
+            <div class="card-section">
+                <div class="section-title">Employee</div>
+                <div class="row2">
+                    <div>
+                        <label>Date</label>
+                        <input type="date" name="Date" value="{{ today }}" required>
+                    </div>
+                    <div>
+                        <label>Select Employee (from master list)</label>
+                        <select id="empSelect" onchange="fillEmp()">
+                            <option value="">-- choose employee --</option>
+                            {% for m in master %}
+                            <option value="{{ loop.index0 }}"
+                                data-band="{{ m.Band or '' }}"
+                                data-empid="{{ m.Emp_Id or '' }}"
+                                data-empname="{{ m.Emp_Name or '' }}">
+                                {{ m.Emp_Id }} — {{ m.Emp_Name }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
                 </div>
-                <div>
-                    <label>Select Employee (from master list)</label>
-                    <select id="empSelect" onchange="fillEmp()">
-                        <option value="">-- choose employee --</option>
-                        {% for m in master %}
-                        <option value="{{ loop.index0 }}"
-                            data-band="{{ m.Band or '' }}"
-                            data-empid="{{ m.Emp_Id or '' }}"
-                            data-empname="{{ m.Emp_Name or '' }}">
-                            {{ m.Emp_Id }} — {{ m.Emp_Name }}
-                        </option>
-                        {% endfor %}
-                    </select>
+
+                <div class="row3">
+                    <div><label>Band</label><input type="text" name="Band" id="Band"></div>
+                    <div><label>Emp_Id</label><input type="text" name="Emp_Id" id="Emp_Id"></div>
+                    <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="Emp_Name"></div>
                 </div>
             </div>
 
-            <div class="row3">
-                <div><label>Band</label><input type="text" name="Band" id="Band"></div>
-                <div><label>Emp_Id</label><input type="text" name="Emp_Id" id="Emp_Id"></div>
-                <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="Emp_Name"></div>
-            </div>
-
-            <div class="card" style="background:#fff8e1;border:1px solid #f0d98c;padding:10px 14px;margin:10px 0;">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                    <input type="checkbox" id="leaveCheck" onchange="toggleLeave()">
+            <div style="background:var(--amber-tint);border:1px solid #ecd9a0;border-radius:8px;padding:12px 16px;margin-top:18px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:0;color:var(--ink);">
+                    <input type="checkbox" id="leaveCheck" onchange="toggleLeave()" style="width:auto;margin-top:0;">
                     On Leave today (auto-fills {{ '%g'|format(leave_hr) }} hr)
                 </label>
             </div>
 
-            <div id="processSection">
-            <label>Process</label>
-            <div id="processRows">
-                <div class="row3 process-row">
-                    <div>
-                        <select class="proc-select">
-                            <option value="">-- select process --</option>
-                            {% for p in processes %}
-                            <option value="{{ p.Process }}">{{ p.Process }}</option>
-                            {% endfor %}
-                        </select>
+            <div id="processSection" class="card-section">
+                <div class="section-title">Process &amp; Hours</div>
+                <div id="processRows">
+                    <div class="row3 process-row">
+                        <div>
+                            <select class="proc-select">
+                                <option value="">-- select process --</option>
+                                {% for p in processes %}
+                                <option value="{{ p.Process }}">{{ p.Process }}{% if p.Target_Hr or p.Target_Pct %} (target {{ p.Target_Hr or '-' }}hr / {{ p.Target_Pct or '-' }}%){% endif %}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div><input type="text" class="proc-desc" placeholder="Description"></div>
+                        <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
                     </div>
-                    <div><input type="text" class="proc-desc" placeholder="Description"></div>
-                    <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
                 </div>
-            </div>
-            <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add another process row</button>
+                <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add another process row</button>
             </div>
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
             <input type="hidden" name="Hr" id="Hr_hidden">
 
-            <div class="row2">
-                <div><label>Other</label><input type="text" name="Other"></div>
-                <div><label>Description</label><input type="text" name="Other_Description"></div>
+            <div class="card-section">
+                <div class="section-title">Additional Notes</div>
+                <div class="row2">
+                    <div><label>Other</label><input type="text" name="Other"></div>
+                    <div><label>Description</label><input type="text" name="Other_Description"></div>
+                </div>
             </div>
 
             <button type="submit" onclick="return collectProcessRows()">Save Entry</button>
         </form>
     </div>
 
-    <div class="card" style="{% if pending_hr > 0 %}border:2px solid #c0392b;{% else %}border:2px solid #2e8b57;{% endif %}">
+    <div class="card" style="{% if pending_hr > 0 %}border:2px solid var(--red);{% else %}border:2px solid var(--green);{% endif %}">
         <h2>Today's Hours — {{ today }}</h2>
         <div class="row3">
             <div><span class="tag">Target: {{ '%g'|format(target_hr) }} hr/day</span></div>
             <div><span class="tag">Logged: {{ '%g'|format(total_hr) }} hr</span></div>
-            <div><span class="tag" style="{% if pending_hr > 0 %}background:#f8d7da;color:#721c24;{% else %}background:#d4edda;color:#155724;{% endif %}">
+            <div><span class="tag" style="{% if pending_hr > 0 %}background:var(--red-tint);color:var(--red);{% else %}background:var(--green-tint);color:var(--green);{% endif %}">
                 Pending: {{ '%g'|format(pending_hr) }} hr
             </span></div>
         </div>
         {% if pending_hr > 0 %}
-        <p style="color:#c0392b;font-weight:bold;margin-top:14px;margin-bottom:0;">
+        <p style="color:var(--red);font-weight:700;margin-top:14px;margin-bottom:0;">
             ⚠ Productivity not complete — {{ '%g'|format(pending_hr) }} hr still pending out of {{ '%g'|format(target_hr) }} hr/day.
         </p>
         {% else %}
-        <p style="color:#2e8b57;font-weight:bold;margin-top:14px;margin-bottom:0;">
+        <p style="color:var(--green);font-weight:700;margin-top:14px;margin-bottom:0;">
             ✅ {{ '%g'|format(target_hr) }} hr/day completed.
         </p>
         {% endif %}
