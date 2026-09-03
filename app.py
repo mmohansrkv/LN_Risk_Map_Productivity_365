@@ -96,7 +96,7 @@ RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, PROCESS_SHEET, "Info"}
 
 USER_COLUMNS = ["Email", "Password", "Name"]
 MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name"]
-PROCESS_COLUMNS = ["Process"]
+PROCESS_COLUMNS = ["Process", "Target_Hr", "Target_Pct"]
 
 # (internal key, label shown on the form / table header)
 TRACKER_FIELDS = [
@@ -157,8 +157,20 @@ def ensure_workbook():
     if PROCESS_SHEET not in wb.sheetnames:
         ws = wb.create_sheet(PROCESS_SHEET)
         ws.append(PROCESS_COLUMNS)
-        style_header(ws, PROCESS_COLUMNS, [30])
+        style_header(ws, PROCESS_COLUMNS, [30, 14, 14])
         changed = True
+    else:
+        # Migrate older Process_List sheets that predate the Target_Hr /
+        # Target_Pct columns by appending the missing headers.
+        ws = wb[PROCESS_SHEET]
+        existing_headers = [c.value for c in ws[1]]
+        for col_idx, col_name in enumerate(PROCESS_COLUMNS, start=1):
+            if col_idx > len(existing_headers) or existing_headers[col_idx - 1] != col_name:
+                cell = ws.cell(row=1, column=col_idx, value=col_name)
+                cell.font = HEADER_FONT
+                cell.fill = HEADER_FILL
+                cell.alignment = Alignment(horizontal="center")
+                changed = True
     if changed:
         wb.save(EXCEL_FILE)
 
@@ -275,20 +287,24 @@ def get_process_list():
     return read_sheet_rows(PROCESS_SHEET, PROCESS_COLUMNS)
 
 
-def add_process(name):
+def add_process(name, target_hr="", target_pct=""):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[PROCESS_SHEET]
-    ws.append([name])
-    ws.cell(row=ws.max_row, column=1).font = CELL_FONT
+    ws.append([name, target_hr, target_pct])
+    row_idx = ws.max_row
+    for col_idx in range(1, len(PROCESS_COLUMNS) + 1):
+        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
     wb.save(EXCEL_FILE)
 
 
-def update_process(row_idx, name):
+def update_process(row_idx, name, target_hr="", target_pct=""):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[PROCESS_SHEET]
     ws.cell(row=row_idx, column=1, value=name).font = CELL_FONT
+    ws.cell(row=row_idx, column=2, value=target_hr).font = CELL_FONT
+    ws.cell(row=row_idx, column=3, value=target_pct).font = CELL_FONT
     wb.save(EXCEL_FILE)
 
 
@@ -399,14 +415,16 @@ def pending_hr_for_records(records):
     return max(0.0, WORK_HOURS_PER_DAY - total_hr_for_records(records))
 
 
-def process_breakdown(record):
+def process_breakdown(record, target_lookup=None):
     """Split a record's ';'-joined Process and Hr strings into a list of
-    {process, hr, pct} dicts, where pct is that process's share of the
-    entry's own total hours. Admin-only display."""
+    {process, hr, pct, target_hr, target_pct} dicts, where pct is that
+    process's share of the entry's own total hours, and target_hr/target_pct
+    come from the admin-maintained Process List (target_lookup keyed by
+    process name). Admin-only display."""
+    target_lookup = target_lookup or {}
     procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
     hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
     items = []
-    total = 0.0
     parsed_hrs = []
     for h in hrs:
         try:
@@ -419,7 +437,12 @@ def process_breakdown(record):
             continue
         hr = parsed_hrs[i] if i < len(parsed_hrs) else 0.0
         pct = round((hr / total) * 100) if total > 0 else 0
-        items.append({"process": proc, "hr": hr, "pct": pct})
+        target = target_lookup.get(proc, {})
+        items.append({
+            "process": proc, "hr": hr, "pct": pct,
+            "target_hr": target.get("Target_Hr") or "",
+            "target_pct": target.get("Target_Pct") or "",
+        })
     return items
 
 
@@ -551,6 +574,11 @@ BASE_STYLE = """
     .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
     .topbar a { color: #305496; text-decoration: none; font-size: 14px; margin-left: 12px; }
     .tag { display: inline-block; background: #eef1f8; color: #305496; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+    body.login-page { max-width: 380px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
+        justify-content: center; padding: 16px; }
+    body.login-page h1 { text-align: center; font-size: 20px; margin: 0 0 14px; }
+    body.login-page .card { padding: 16px; margin-bottom: 14px; }
+    body.login-page p { text-align: center; margin: 0; }
 </style>
 """
 
@@ -569,7 +597,7 @@ USER_LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>User Login</title>""" + BASE_STYLE + """</head>
-<body>
+<body class="login-page">
     <h1>👤 User Login</h1>
     """ + FLASHES + """
     <div class="card">
@@ -761,7 +789,7 @@ ADMIN_LOGIN_PAGE = """
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Admin Login</title>""" + BASE_STYLE + """</head>
-<body>
+<body class="login-page">
     <h1>🔐 Admin Login</h1>
     """ + FLASHES + """
     <div class="card">
@@ -840,7 +868,7 @@ ADMIN_PAGE = """
                 {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
                 <td>
                     {% for b in r._breakdown %}
-                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if not loop.last %}<br>{% endif %}
+                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if b.target_hr or b.target_pct %} <span class="note">/ target {{ b.target_hr or '-' }}hr ({{ b.target_pct or '-' }}%)</span>{% endif %}{% if not loop.last %}<br>{% endif %}
                     {% endfor %}
                 </td>
                 <td>
@@ -966,21 +994,26 @@ PROCESS_PAGE = """
     <div class="card">
         <h2>Add Process</h2>
         <form method="POST" action="{{ url_for('admin_process_add') }}">
-            <label>Process name</label>
-            <input type="text" name="Process" required>
+            <div class="row3">
+                <div><label>Process name</label><input type="text" name="Process" required></div>
+                <div><label>Target Hr</label><input type="number" step="0.25" name="Target_Hr"></div>
+                <div><label>Target %</label><input type="number" step="1" name="Target_Pct"></div>
+            </div>
             <button type="submit">Add Process</button>
         </form>
-        <p class="note">This is the dropdown list users choose from when filling out an entry.</p>
+        <p class="note">This is the dropdown list users choose from when filling out an entry. Target Hr / Target % are used to compare against actual logged hours in the admin records view.</p>
     </div>
 
     <div class="card">
         <h2>Current Processes</h2>
         {% if processes %}
         <table>
-            <tr><th>Process</th><th>Actions</th></tr>
+            <tr><th>Process</th><th>Target Hr</th><th>Target %</th><th>Actions</th></tr>
             {% for p in processes %}
             <tr>
                 <td>{{ p.Process }}</td>
+                <td>{{ p.Target_Hr or '-' }}</td>
+                <td>{{ p.Target_Pct or '-' }}</td>
                 <td>
                     <a class="btn btn-small" href="{{ url_for('admin_process_edit', row=p['_row']) }}">Edit</a>
                     <form style="display:inline" method="POST" action="{{ url_for('admin_process_delete', row=p['_row']) }}"
@@ -1009,6 +1042,10 @@ PROCESS_EDIT_PAGE = """
         <form method="POST">
             <label>Process name</label>
             <input type="text" name="Process" value="{{ record.Process or '' }}" required>
+            <div class="row2">
+                <div><label>Target Hr</label><input type="number" step="0.25" name="Target_Hr" value="{{ record.Target_Hr or '' }}"></div>
+                <div><label>Target %</label><input type="number" step="1" name="Target_Pct" value="{{ record.Target_Pct or '' }}"></div>
+            </div>
             <button type="submit">Save Changes</button>
         </form>
     </div>
@@ -1185,8 +1222,9 @@ def admin_panel():
     today = now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date") or (dates[0] if dates else today)
     records = get_records_for_date(selected_date)
+    target_lookup = {p["Process"]: p for p in get_process_list() if p.get("Process")}
     for r in records:
-        r["_breakdown"] = process_breakdown(r)
+        r["_breakdown"] = process_breakdown(r, target_lookup)
     user_counts = entry_counts_by_user(records)
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
@@ -1284,8 +1322,10 @@ def admin_process():
 @admin_required
 def admin_process_add():
     name = request.form.get("Process", "").strip()
+    target_hr = request.form.get("Target_Hr", "").strip()
+    target_pct = request.form.get("Target_Pct", "").strip()
     if name:
-        add_process(name)
+        add_process(name, target_hr, target_pct)
         flash(f"Added process '{name}'.")
     return redirect(url_for("admin_process"))
 
@@ -1295,7 +1335,9 @@ def admin_process_add():
 def admin_process_edit(row):
     if request.method == "POST":
         name = request.form.get("Process", "").strip()
-        update_process(row, name)
+        target_hr = request.form.get("Target_Hr", "").strip()
+        target_pct = request.form.get("Target_Pct", "").strip()
+        update_process(row, name, target_hr, target_pct)
         flash("Process updated.")
         return redirect(url_for("admin_process"))
     record = next((p for p in get_process_list() if p["_row"] == row), None)
