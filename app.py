@@ -96,9 +96,15 @@ RESERVED_SHEETS = {USERS_SHEET, MASTER_SHEET, PROCESS_SHEET, "Info"}
 
 USER_COLUMNS = ["Email", "Password", "Name"]
 MASTER_COLUMNS = ["Band", "Emp_Id", "Emp_Name"]
-PROCESS_COLUMNS = ["Process", "Target_Hr", "Target_Pct"]
+# Target_Count_Hr = target units/pieces per hour for this process, used with a
+# tracker row's own Count + Hr to compute "Target hr %" = Count / (Target_Count_Hr * Hr) * 100
+PROCESS_COLUMNS = ["Process", "Target_Hr", "Target_Pct", "Target_Count_Hr"]
 
 # (internal key, label shown on the form / table header)
+# NOTE: "Count" is appended at the END (not next to Hr) on purpose — date
+# sheets already created before this feature existed have a fixed 10-column
+# layout, and appending keeps that old data readable (see read_sheet_rows /
+# get_records_for_date, which zip columns positionally).
 TRACKER_FIELDS = [
     ("Date", "Date"),
     ("Band", "Band"),
@@ -110,6 +116,7 @@ TRACKER_FIELDS = [
     ("Hr", "Hr"),
     ("Other_Description", "Description"),
     ("Logged_By", "Logged By"),
+    ("Count", "Count"),
 ]
 TRACKER_COLUMNS = [k for k, _ in TRACKER_FIELDS]
 
@@ -180,7 +187,7 @@ def get_or_create_sheet(wb, sheet_name):
         return wb[sheet_name]
     ws = wb.create_sheet(title=sheet_name)
     ws.append(TRACKER_COLUMNS)
-    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 16, 24, 12, 8, 24, 22])
+    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 16, 24, 12, 8, 24, 22, 10])
     return ws
 
 
@@ -287,24 +294,25 @@ def get_process_list():
     return read_sheet_rows(PROCESS_SHEET, PROCESS_COLUMNS)
 
 
-def add_process(name, target_hr="", target_pct=""):
+def add_process(name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[PROCESS_SHEET]
-    ws.append([name, target_hr, target_pct])
+    ws.append([name, target_hr, target_pct, target_count_hr])
     row_idx = ws.max_row
     for col_idx in range(1, len(PROCESS_COLUMNS) + 1):
         ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
     wb.save(EXCEL_FILE)
 
 
-def update_process(row_idx, name, target_hr="", target_pct=""):
+def update_process(row_idx, name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
     wb = load_workbook(EXCEL_FILE)
     ws = wb[PROCESS_SHEET]
     ws.cell(row=row_idx, column=1, value=name).font = CELL_FONT
     ws.cell(row=row_idx, column=2, value=target_hr).font = CELL_FONT
     ws.cell(row=row_idx, column=3, value=target_pct).font = CELL_FONT
+    ws.cell(row=row_idx, column=4, value=target_count_hr).font = CELL_FONT
     wb.save(EXCEL_FILE)
 
 
@@ -416,34 +424,43 @@ def pending_hr_for_records(records):
 
 
 def split_process_rows(record):
-    """Split a record's ';'-joined Process/Description/Hr strings into a
-    list of {Process, Description, Hr} row dicts, for pre-filling the
+    """Split a record's ';'-joined Process/Description/Hr/Count strings into a
+    list of {Process, Description, Hr, Count} row dicts, for pre-filling the
     multi-row process editor on the admin edit page."""
     procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
     descs = [d.strip() for d in str(record.get("Description") or "").split(";")]
     hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
-    n = max(len(procs), len(descs), len(hrs))
+    counts = [c.strip() for c in str(record.get("Count") or "").split(";")]
+    n = max(len(procs), len(descs), len(hrs), len(counts))
     rows = []
     for i in range(n):
         p = procs[i] if i < len(procs) else ""
         d = descs[i] if i < len(descs) else ""
         h = hrs[i] if i < len(hrs) else ""
-        if p or d or h:
-            rows.append({"Process": p, "Description": d, "Hr": h})
+        c = counts[i] if i < len(counts) else ""
+        if p or d or h or c:
+            rows.append({"Process": p, "Description": d, "Hr": h, "Count": c})
     if not rows:
-        rows = [{"Process": "", "Description": "", "Hr": ""}]
+        rows = [{"Process": "", "Description": "", "Hr": "", "Count": ""}]
     return rows
 
 
 def process_breakdown(record, target_lookup=None):
-    """Split a record's ';'-joined Process and Hr strings into a list of
-    {process, hr, pct, target_hr, target_pct} dicts, where pct is that
-    process's share of the entry's own total hours, and target_hr/target_pct
-    come from the admin-maintained Process List (target_lookup keyed by
-    process name). Admin-only display."""
+    """Split a record's ';'-joined Process/Hr/Count strings into a list of
+    {process, hr, pct, count, target_hr, target_pct, target_count_hr,
+    target_hr_pct} dicts, where:
+      - pct is that process's share of the entry's own total hours
+      - target_hr/target_pct come from the admin-maintained Process List
+      - target_count_hr is the admin-set units/hr target for that process
+      - target_hr_pct ("Target hr %") = Count / (Target_Count_Hr * Hr) * 100,
+        i.e. actual output vs. what the hourly target would expect for the
+        hours actually logged on that process. Blank if no Target_Count_Hr
+        is set for the process, or no hours were logged.
+    Admin-only display."""
     target_lookup = target_lookup or {}
     procs = [p.strip() for p in str(record.get("Process") or "").split(";")]
     hrs = [h.strip() for h in str(record.get("Hr") or "").split(";")]
+    counts = [c.strip() for c in str(record.get("Count") or "").split(";")]
     items = []
     parsed_hrs = []
     for h in hrs:
@@ -451,17 +468,34 @@ def process_breakdown(record, target_lookup=None):
             parsed_hrs.append(float(h)) if h else parsed_hrs.append(0.0)
         except ValueError:
             parsed_hrs.append(0.0)
+    parsed_counts = []
+    for c in counts:
+        try:
+            parsed_counts.append(float(c)) if c else parsed_counts.append(0.0)
+        except ValueError:
+            parsed_counts.append(0.0)
     total = sum(parsed_hrs)
     for i, proc in enumerate(procs):
         if not proc:
             continue
         hr = parsed_hrs[i] if i < len(parsed_hrs) else 0.0
+        count = parsed_counts[i] if i < len(parsed_counts) else 0.0
         pct = round((hr / total) * 100) if total > 0 else 0
         target = target_lookup.get(proc, {})
+        target_count_hr = target.get("Target_Count_Hr") or ""
+        target_hr_pct = ""
+        try:
+            tch = float(target_count_hr)
+            if tch > 0 and hr > 0:
+                target_hr_pct = round((count / (tch * hr)) * 100)
+        except (ValueError, TypeError):
+            target_hr_pct = ""
         items.append({
-            "process": proc, "hr": hr, "pct": pct,
+            "process": proc, "hr": hr, "pct": pct, "count": count,
             "target_hr": target.get("Target_Hr") or "",
             "target_pct": target.get("Target_Pct") or "",
+            "target_count_hr": target_count_hr,
+            "target_hr_pct": target_hr_pct,
         })
     return items
 
@@ -596,6 +630,7 @@ BASE_STYLE = """
     input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); }
     .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
     .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
+    .row4 { display: grid; grid-template-columns: 1.4fr 1fr 0.7fr 0.7fr; gap: 0 16px; }
     button, .btn { margin-top: 18px; padding: 10px 22px; background: var(--primary); color: white; border: none;
         border-radius: 6px; font-size: 14.5px; font-weight: 600; cursor: pointer; text-decoration: none; display: inline-block;
         font-family: 'Inter', Arial, sans-serif; }
@@ -715,18 +750,19 @@ USER_HOME_PAGE = """
             <div id="processSection" class="card-section">
                 <div class="section-title">Process &amp; Hours</div>
                 <div id="processRows">
-                    <div class="row3 process-row">
+                    <div class="row4 process-row">
                         <div>
                             <select class="proc-select" onchange="updateProcTarget(this)">
                                 <option value="">-- select process --</option>
                                 {% for p in processes %}
-                                <option value="{{ p.Process }}" data-target-hr="{{ p.Target_Hr or '' }}" data-target-pct="{{ p.Target_Pct or '' }}">{{ p.Process }}</option>
+                                <option value="{{ p.Process }}" data-target-hr="{{ p.Target_Hr or '' }}" data-target-pct="{{ p.Target_Pct or '' }}" data-target-count-hr="{{ p.Target_Count_Hr or '' }}">{{ p.Process }}</option>
                                 {% endfor %}
                             </select>
                             <div class="proc-target note"></div>
                         </div>
                         <div><input type="text" class="proc-desc" placeholder="Description"></div>
                         <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr"></div>
+                        <div><input type="number" step="1" class="proc-count" placeholder="Count"></div>
                     </div>
                 </div>
                 <button type="button" class="btn btn-small" onclick="addProcessRow()">+ Add another process row</button>
@@ -734,6 +770,7 @@ USER_HOME_PAGE = """
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
             <input type="hidden" name="Hr" id="Hr_hidden">
+            <input type="hidden" name="Count" id="Count_hidden">
 
             <div class="card-section">
                 <div class="section-title">Additional Notes</div>
@@ -802,8 +839,12 @@ function updateProcTarget(select) {
     var targetDiv = select.parentElement.querySelector('.proc-target');
     var hr = opt.getAttribute('data-target-hr');
     var pct = opt.getAttribute('data-target-pct');
-    if (opt.value && (hr || pct)) {
-        targetDiv.textContent = 'Target: ' + (hr || '-') + ' hr / ' + (pct || '-') + '%';
+    var countHr = opt.getAttribute('data-target-count-hr');
+    if (opt.value && (hr || pct || countHr)) {
+        var parts = [];
+        if (hr || pct) parts.push((hr || '-') + ' hr / ' + (pct || '-') + '%');
+        if (countHr) parts.push(countHr + ' /hr target');
+        targetDiv.textContent = 'Target: ' + parts.join(' · ');
     } else {
         targetDiv.textContent = '';
     }
@@ -815,6 +856,7 @@ function addProcessRow() {
     row.querySelector('.proc-select').selectedIndex = 0;
     row.querySelector('.proc-desc').value = '';
     row.querySelector('.proc-hr').value = '';
+    row.querySelector('.proc-count').value = '';
     row.querySelector('.proc-target').textContent = '';
     container.appendChild(row);
 }
@@ -824,25 +866,30 @@ function collectProcessRows() {
         document.getElementById('Process_hidden').value = 'Leave';
         document.getElementById('Description_hidden').value = 'Leave';
         document.getElementById('Hr_hidden').value = '{{ leave_hr }}';
+        document.getElementById('Count_hidden').value = '';
         return true;
     }
     var selects = document.querySelectorAll('#processRows .proc-select');
     var descs = document.querySelectorAll('#processRows .proc-desc');
     var hrs = document.querySelectorAll('#processRows .proc-hr');
-    var procs = [], descVals = [], hrVals = [];
+    var counts = document.querySelectorAll('#processRows .proc-count');
+    var procs = [], descVals = [], hrVals = [], countVals = [];
     for (var i = 0; i < selects.length; i++) {
         var p = selects[i].value.trim();
         var d = descs[i].value.trim();
         var h = hrs[i].value.trim();
-        if (p || d || h) {
+        var c = counts[i].value.trim();
+        if (p || d || h || c) {
             procs.push(p);
             descVals.push(d);
             hrVals.push(h);
+            countVals.push(c);
         }
     }
     document.getElementById('Process_hidden').value = procs.join('; ');
     document.getElementById('Description_hidden').value = descVals.join('; ');
     document.getElementById('Hr_hidden').value = hrVals.join('; ');
+    document.getElementById('Count_hidden').value = countVals.join('; ');
     if (procs.length === 0) {
         alert('Please select at least one process.');
         return false;
@@ -938,7 +985,7 @@ ADMIN_PAGE = """
                 {% for key, _ in fields %}<td>{{ r[key] }}</td>{% endfor %}
                 <td>
                     {% for b in r._breakdown %}
-                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if b.target_hr or b.target_pct %} <span class="note">/ target {{ b.target_hr or '-' }}hr ({{ b.target_pct or '-' }}%)</span>{% endif %}{% if not loop.last %}<br>{% endif %}
+                    {{ b.process }}: {{ b.hr|string }}hr ({{ b.pct }}%){% if b.count %}, count {{ b.count|int }}{% endif %}{% if b.target_hr or b.target_pct %} <span class="note">/ target {{ b.target_hr or '-' }}hr ({{ b.target_pct or '-' }}%)</span>{% endif %}{% if b.target_hr_pct != '' %} <span class="note">/ Target hr%: {{ b.target_hr_pct }}%</span>{% endif %}{% if not loop.last %}<br>{% endif %}
                     {% endfor %}
                 </td>
                 <td>
@@ -977,7 +1024,7 @@ EDIT_PAGE = """
             <label>Process</label>
             <div id="processRows">
                 {% for row in process_rows %}
-                <div class="row3 process-row">
+                <div class="row4 process-row">
                     <div>
                         <select class="proc-select">
                             <option value="">-- select process --</option>
@@ -988,6 +1035,7 @@ EDIT_PAGE = """
                     </div>
                     <div><input type="text" class="proc-desc" placeholder="Description" value="{{ row.Description }}"></div>
                     <div><input type="number" step="0.25" class="proc-hr" placeholder="Hr" value="{{ row.Hr }}"></div>
+                    <div><input type="number" step="1" class="proc-count" placeholder="Count" value="{{ row.Count }}"></div>
                 </div>
                 {% endfor %}
             </div>
@@ -995,6 +1043,7 @@ EDIT_PAGE = """
             <input type="hidden" name="Process" id="Process_hidden">
             <input type="hidden" name="Description" id="Description_hidden">
             <input type="hidden" name="Hr" id="Hr_hidden">
+            <input type="hidden" name="Count" id="Count_hidden">
 
             <label>Logged By</label>
             <input type="text" name="Logged_By" value="{{ record.Logged_By or '' }}">
@@ -1011,6 +1060,7 @@ function addProcessRow() {
     row.querySelector('.proc-select').selectedIndex = 0;
     row.querySelector('.proc-desc').value = '';
     row.querySelector('.proc-hr').value = '';
+    row.querySelector('.proc-count').value = '';
     container.appendChild(row);
 }
 
@@ -1018,20 +1068,24 @@ function collectProcessRows() {
     var selects = document.querySelectorAll('#processRows .proc-select');
     var descs = document.querySelectorAll('#processRows .proc-desc');
     var hrs = document.querySelectorAll('#processRows .proc-hr');
-    var procs = [], descVals = [], hrVals = [];
+    var counts = document.querySelectorAll('#processRows .proc-count');
+    var procs = [], descVals = [], hrVals = [], countVals = [];
     for (var i = 0; i < selects.length; i++) {
         var p = selects[i].value.trim();
         var d = descs[i].value.trim();
         var h = hrs[i].value.trim();
-        if (p || d || h) {
+        var c = counts[i].value.trim();
+        if (p || d || h || c) {
             procs.push(p);
             descVals.push(d);
             hrVals.push(h);
+            countVals.push(c);
         }
     }
     document.getElementById('Process_hidden').value = procs.join('; ');
     document.getElementById('Description_hidden').value = descVals.join('; ');
     document.getElementById('Hr_hidden').value = hrVals.join('; ');
+    document.getElementById('Count_hidden').value = countVals.join('; ');
     if (procs.length === 0) {
         alert('Please select at least one process.');
         return false;
@@ -1128,26 +1182,28 @@ PROCESS_PAGE = """
     <div class="card">
         <h2>Add Process</h2>
         <form method="POST" action="{{ url_for('admin_process_add') }}">
-            <div class="row3">
+            <div class="row4">
                 <div><label>Process name</label><input type="text" name="Process" required></div>
                 <div><label>Target Hr</label><input type="number" step="0.25" name="Target_Hr"></div>
                 <div><label>Target %</label><input type="number" step="1" name="Target_Pct"></div>
+                <div><label>Target Count/Hr</label><input type="number" step="1" name="Target_Count_Hr"></div>
             </div>
             <button type="submit">Add Process</button>
         </form>
-        <p class="note">This is the dropdown list users choose from when filling out an entry. Target Hr / Target % are used to compare against actual logged hours in the admin records view.</p>
+        <p class="note">This is the dropdown list users choose from when filling out an entry. Target Hr / Target % are used to compare against actual logged hours in the admin records view. Target Count/Hr is the units-per-hour target used to compute "Target hr %" (Count ÷ (Target Count/Hr × Hr) × 100) for each process row.</p>
     </div>
 
     <div class="card">
         <h2>Current Processes</h2>
         {% if processes %}
         <table>
-            <tr><th>Process</th><th>Target Hr</th><th>Target %</th><th>Actions</th></tr>
+            <tr><th>Process</th><th>Target Hr</th><th>Target %</th><th>Target Count/Hr</th><th>Actions</th></tr>
             {% for p in processes %}
             <tr>
                 <td>{{ p.Process }}</td>
                 <td>{{ p.Target_Hr or '-' }}</td>
                 <td>{{ p.Target_Pct or '-' }}</td>
+                <td>{{ p.Target_Count_Hr or '-' }}</td>
                 <td>
                     <a class="btn btn-small" href="{{ url_for('admin_process_edit', row=p['_row']) }}">Edit</a>
                     <form style="display:inline" method="POST" action="{{ url_for('admin_process_delete', row=p['_row']) }}"
@@ -1176,9 +1232,10 @@ PROCESS_EDIT_PAGE = """
         <form method="POST">
             <label>Process name</label>
             <input type="text" name="Process" value="{{ record.Process or '' }}" required>
-            <div class="row2">
+            <div class="row3">
                 <div><label>Target Hr</label><input type="number" step="0.25" name="Target_Hr" value="{{ record.Target_Hr or '' }}"></div>
                 <div><label>Target %</label><input type="number" step="1" name="Target_Pct" value="{{ record.Target_Pct or '' }}"></div>
+                <div><label>Target Count/Hr</label><input type="number" step="1" name="Target_Count_Hr" value="{{ record.Target_Count_Hr or '' }}"></div>
             </div>
             <button type="submit">Save Changes</button>
         </form>
@@ -1383,7 +1440,7 @@ def admin_edit(date, row):
         abort(404)
     processes = get_process_list()
     process_rows = split_process_rows(record)
-    other_fields = [(k, l) for k, l in TRACKER_FIELDS if k not in ("Process", "Description", "Hr")]
+    other_fields = [(k, l) for k, l in TRACKER_FIELDS if k not in ("Process", "Description", "Hr", "Count")]
     return render_template_string(
         EDIT_PAGE, date=date, record=record, fields=TRACKER_FIELDS,
         other_fields=other_fields, processes=processes, process_rows=process_rows
@@ -1464,8 +1521,9 @@ def admin_process_add():
     name = request.form.get("Process", "").strip()
     target_hr = request.form.get("Target_Hr", "").strip()
     target_pct = request.form.get("Target_Pct", "").strip()
+    target_count_hr = request.form.get("Target_Count_Hr", "").strip()
     if name:
-        add_process(name, target_hr, target_pct)
+        add_process(name, target_hr, target_pct, target_count_hr)
         flash(f"Added process '{name}'.")
     return redirect(url_for("admin_process"))
 
@@ -1477,7 +1535,8 @@ def admin_process_edit(row):
         name = request.form.get("Process", "").strip()
         target_hr = request.form.get("Target_Hr", "").strip()
         target_pct = request.form.get("Target_Pct", "").strip()
-        update_process(row, name, target_hr, target_pct)
+        target_count_hr = request.form.get("Target_Count_Hr", "").strip()
+        update_process(row, name, target_hr, target_pct, target_count_hr)
         flash("Process updated.")
         return redirect(url_for("admin_process"))
     record = next((p for p in get_process_list() if p["_row"] == row), None)
