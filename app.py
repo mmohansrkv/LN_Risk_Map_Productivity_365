@@ -84,6 +84,15 @@ if USE_POSTGRES:
     # Render's internal DATABASE_URL sometimes starts with "postgres://",
     # which older/newer driver combos can be picky about; psycopg2 accepts
     # either "postgres://" or "postgresql://" fine, so no rewrite needed.
+else:
+    print(
+        "[WARNING] DATABASE_URL is not set — using a local SQLite file at "
+        f"'{DB_PATH}'. On Render (and most hosts), the web service's own disk "
+        "is wiped on every redeploy AND every time the service restarts after "
+        "being idle, so all tracker data will be LOST without warning. "
+        "Attach a Render Postgres instance and set DATABASE_URL to its "
+        "'Internal Database URL' to make data persist."
+    )
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
@@ -366,15 +375,16 @@ def delete_process(row_idx):
 # ---------------------------------------------------------------------------
 # Tracker entries helpers
 # ---------------------------------------------------------------------------
-def save_entry(data: dict):
+def save_entry(data: dict, sheet_date=None):
     ensure_workbook()
-    today_str = now().strftime("%Y-%m-%d")
+    if sheet_date is None:
+        sheet_date = now().strftime("%Y-%m-%d")
     conn = get_db()
     values = [data.get(col, "") for col in TRACKER_COLUMNS]
     q(conn,
         f"INSERT INTO entries (sheet_date, {', '.join(_ENTRY_DB_COLS)}) "
         f"VALUES (?, {', '.join(['?'] * len(_ENTRY_DB_COLS))})",
-        [today_str] + values,
+        [sheet_date] + values,
     )
     conn.commit()
     conn.close()
@@ -590,6 +600,7 @@ def expand_record_rows(record, target_lookup=None):
         except ValueError:
             parsed_hrs.append(0.0)
     total_hr = sum(parsed_hrs)
+    day_pct = round((total_hr / WORK_HOURS_PER_DAY) * 100) if WORK_HOURS_PER_DAY > 0 else 0
 
     rows = []
     for idx, (p, d, h, c) in enumerate(raw):
@@ -615,6 +626,7 @@ def expand_record_rows(record, target_lookup=None):
         sub["Hr"] = h
         sub["Count"] = c
         sub["_pct"] = pct
+        sub["_day_pct"] = day_pct
         sub["_target_hr"] = target.get("Target_Hr") or ""
         sub["_target_pct"] = target.get("Target_Pct") or ""
         sub["_target_count_hr"] = target_count_hr
@@ -625,23 +637,50 @@ def expand_record_rows(record, target_lookup=None):
     return rows
 
 
-REPORT_COLUMNS = [label for _, label in TRACKER_FIELDS] + ["% of Day", "Target hr%"]
-REPORT_COLUMN_WIDTHS = [12, 8, 10, 16, 16, 24, 10, 8, 24, 22, 10, 10, 12]
+REPORT_COLUMNS = (
+    [label for _, label in TRACKER_FIELDS[:8]]      # ... up through "Hr"
+    + ["Day Overall %"]
+    + [label for _, label in TRACKER_FIELDS[8:]]    # Description, Logged By, Count
+    + ["% of Day", "Target hr%"]
+)
+REPORT_COLUMN_WIDTHS = [12, 8, 10, 16, 16, 24, 10, 8, 14, 24, 22, 10, 10, 12]
+REPORT_HR_INSERT_AT = 8          # 0-based position where Day Overall % lands
+REPORT_LOGGED_BY_COLUMN = "Logged By"
 
 
-def build_report_sheet(wb, date_str, target_lookup):
-    """Add one sheet named `date_str` to `wb`, formatted exactly like the
-    admin panel's Records table: one row per process (entries with more
-    than one process are split), plus '% of Day' and 'Target hr%' columns
-    computed the same way expand_record_rows computes them on-screen."""
+def build_report_sheet(wb, date_str, target_lookup, logged_by_filter=None):
+    """Add one sheet named `date_str` to `wb`, formatted like the admin
+    panel's Records table: one row per process (entries with more than one
+    process are split), a 'Day Overall %' column right after Hr (the
+    entry's total logged Hr as a % of the 8-hr work day), and '% of Day' /
+    'Target hr%' columns at the end. The Logged By column is kept in the
+    data but hidden, so it isn't shown unless a viewer un-hides it.
+
+    If `logged_by_filter` is given, only that user's own entries for the
+    date are included — used for the "download my data" button on the
+    regular user's page, so each user can export just their own records
+    in the exact same report format admin downloads use. Returns True if
+    the sheet ended up with at least one data row, False otherwise (so
+    callers can skip/remove empty sheets, e.g. dates with no data for
+    the filtered user)."""
     ws = wb.create_sheet(title=date_str)
     ws.append(REPORT_COLUMNS)
     style_header(ws, REPORT_COLUMNS, REPORT_COLUMN_WIDTHS)
 
     records = get_records_for_date(date_str)
+    if logged_by_filter is not None:
+        records = [r for r in records if r.get("Logged_By") == logged_by_filter]
+
+    has_rows = False
     for record in records:
         for sub in expand_record_rows(record, target_lookup):
-            row = [sub.get(key, "") for key, _ in TRACKER_FIELDS]
+            base_values = [sub.get(key, "") for key, _ in TRACKER_FIELDS]
+            day_pct = sub.get("_day_pct")
+            row = (
+                base_values[:REPORT_HR_INSERT_AT]
+                + [f"{day_pct}%" if day_pct != "" else ""]
+                + base_values[REPORT_HR_INSERT_AT:]
+            )
             row.append(f"{sub['_pct']}%" if sub.get("_pct") != "" else "")
             target_hr_pct = sub.get("_target_hr_pct")
             row.append(f"{target_hr_pct}%" if target_hr_pct != "" else "")
@@ -649,25 +688,43 @@ def build_report_sheet(wb, date_str, target_lookup):
             row_idx = ws.max_row
             for col_idx in range(1, len(REPORT_COLUMNS) + 1):
                 ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    return ws
+            has_rows = True
+
+    logged_by_col = REPORT_COLUMNS.index(REPORT_LOGGED_BY_COLUMN) + 1
+    ws.column_dimensions[get_column_letter(logged_by_col)].hidden = True
+    return has_rows
 
 
-def build_report_workbook(dates):
+def build_report_workbook(dates, logged_by_filter=None):
     """Build a fresh workbook with one report-style sheet per date in
     `dates` (see build_report_sheet), plus the Master and Process_List
-    sheets kept at the end for reference. No Users sheet is ever included."""
+    sheets kept at the end for reference. No Users sheet is ever included.
+
+    If `logged_by_filter` is set (a user's email), each date sheet only
+    contains that user's own entries, dates with none of their entries are
+    dropped entirely, and the Master/Process_List reference sheets are left
+    out — this is the "download my data" case for the regular user page,
+    as opposed to the admin's full/monthly downloads."""
     wb = Workbook()
     wb.remove(wb.active)
 
     processes = get_process_list()
     target_lookup = {p["Process"]: p for p in processes if p.get("Process")}
 
+    any_rows = False
     for date_str in sorted(dates):
-        build_report_sheet(wb, date_str, target_lookup)
+        has_rows = build_report_sheet(wb, date_str, target_lookup, logged_by_filter)
+        if logged_by_filter is not None and not has_rows:
+            del wb[date_str]
+        else:
+            any_rows = any_rows or has_rows
 
-    if not dates:
+    if not dates or (logged_by_filter is not None and not any_rows):
         ws = wb.create_sheet("Info")
         ws["A1"] = "No data available for the selected range."
+
+    if logged_by_filter is not None:
+        return wb
 
     # Master + Process_List sheets, pulled live from the database (kept in
     # the download for reference; Users/login accounts are never included).
@@ -747,6 +804,75 @@ def send_daily_pending_hr_reminders():
             send_email(email, f"Productivity Tracker — {pending:g} hr pending for {today}", body)
 
 
+BACKUP_FOLDER = os.path.join(DATA_FOLDER, "backups")
+
+
+def backup_all_data_to_excel():
+    """Dump every table (Users, Master, Process_List, and every date's raw
+    tracker entries) into a single timestamped .xlsx file under
+    BACKUP_FOLDER. This exists because the live data now lives in a
+    database, not an Excel file, so this is a periodic safety copy of the
+    old-style 'every entry, every date' data in case the database is ever
+    lost or needs auditing. Keeps at most the 30 most recent backup files
+    (older ones are deleted) so the backups folder doesn't grow forever.
+    Returns the path of the file that was written."""
+    ensure_workbook()
+    os.makedirs(BACKUP_FOLDER, exist_ok=True)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    for sheet_name, columns, widths, records in (
+        (USERS_SHEET, USER_COLUMNS, [30, 18, 20], get_users()),
+        (MASTER_SHEET, MASTER_COLUMNS, [10, 12, 20], get_master_list()),
+        (PROCESS_SHEET, PROCESS_COLUMNS, [30, 14, 14, 16], get_process_list()),
+    ):
+        ws = wb.create_sheet(sheet_name)
+        ws.append(columns)
+        style_header(ws, columns, widths)
+        for record in records:
+            row = [record.get(col, "") for col in columns]
+            ws.append(row)
+            row_idx = ws.max_row
+            for col_idx in range(1, len(columns) + 1):
+                ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
+
+    for date_str in list_available_dates():
+        ws = wb.create_sheet(title=date_str)
+        ws.append(TRACKER_COLUMNS)
+        style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 16, 24, 10, 8, 24, 22, 10])
+        for record in get_records_for_date(date_str):
+            row = [record.get(col, "") for col in TRACKER_COLUMNS]
+            ws.append(row)
+            row_idx = ws.max_row
+            for col_idx in range(1, len(TRACKER_COLUMNS) + 1):
+                ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
+
+    timestamp = now().strftime("%Y-%m-%d_%H%M%S")
+    path = os.path.join(BACKUP_FOLDER, f"tracker_backup_{timestamp}.xlsx")
+    wb.save(path)
+
+    # Keep only the 30 most recent backups.
+    existing = sorted(
+        f for f in os.listdir(BACKUP_FOLDER) if f.startswith("tracker_backup_") and f.endswith(".xlsx")
+    )
+    for old_file in existing[:-30]:
+        try:
+            os.remove(os.path.join(BACKUP_FOLDER, old_file))
+        except OSError:
+            pass
+
+    return path
+
+
+def list_backup_files():
+    """Backup filenames under BACKUP_FOLDER, newest first."""
+    if not os.path.exists(BACKUP_FOLDER):
+        return []
+    files = [f for f in os.listdir(BACKUP_FOLDER) if f.startswith("tracker_backup_") and f.endswith(".xlsx")]
+    return sorted(files, reverse=True)
+
+
 def _start_reminder_scheduler():
     """Best-effort background scheduler for the 3:00 PM reminder. Uses
     APScheduler if installed; silently no-ops otherwise so the app still
@@ -761,6 +887,10 @@ def _start_reminder_scheduler():
     scheduler.add_job(
         send_daily_pending_hr_reminders,
         "cron", hour=REMINDER_HOUR, minute=REMINDER_MINUTE,
+    )
+    scheduler.add_job(
+        backup_all_data_to_excel,
+        "cron", hour=23, minute=55,
     )
     scheduler.start()
 
@@ -1157,6 +1287,17 @@ ADMIN_PAGE = """
     </div>
     """ + FLASHES + """
 
+    {% if not use_postgres %}
+    <div class="flash" style="background:#fbeae7;color:#B94A3D;border:2px solid #B94A3D;font-weight:700;">
+        ⚠ DATA IS NOT SAVED PERMANENTLY. This app is running on a temporary SQLite
+        file, not a real database. Everything entered here — including this data —
+        will be LOST the next time the server restarts (which can happen after just
+        a few minutes of no traffic). Set the <code>DATABASE_URL</code> environment
+        variable to a persistent Postgres database to fix this. Ask your developer
+        to attach one on the hosting dashboard.
+    </div>
+    {% endif %}
+
     <div class="card">
         <form method="GET" action="{{ url_for('admin_panel') }}">
             <label>Select date</label>
@@ -1181,6 +1322,159 @@ ADMIN_PAGE = """
         <a class="btn" href="{{ url_for('download_excel_month', month=selected_month) }}">⬇ Download Month's Excel File</a>
         {% endif %}
     </div>
+
+    <div class="card">
+        <h2>Backups</h2>
+        <p class="note">A full data backup is saved automatically every night. You can also trigger one now, or download a past one.</p>
+        <form method="POST" action="{{ url_for('backup_now') }}" style="display:inline">
+            <button type="submit">📦 Backup Now</button>
+        </form>
+        {% if backups %}
+        <form method="GET" action="" style="display:inline" onsubmit="return false;">
+            <select id="backupSelect">
+                {% for b in backups %}
+                <option value="{{ b }}">{{ b }}</option>
+                {% endfor %}
+            </select>
+        </form>
+        <a class="btn btn-small" href="#" onclick="downloadSelectedBackup(); return false;">⬇ Download Selected Backup</a>
+        <script>
+        function downloadSelectedBackup() {
+            var sel = document.getElementById('backupSelect');
+            if (sel && sel.value) {
+                window.location.href = "/admin/backup/download/" + encodeURIComponent(sel.value);
+            }
+        }
+        </script>
+        {% else %}
+        <p>No backups yet — click "Backup Now" to create the first one.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>Add Entry (as any user)</h2>
+        <p class="note">Log an entry on someone else's behalf, for today or a past date — e.g. add {{ today }}'s or an earlier date's data for a user who missed it.</p>
+        <form method="POST" action="{{ url_for('admin_add_entry') }}">
+            <div class="card-section">
+                <div class="section-title">Employee</div>
+                <div class="row2">
+                    <div>
+                        <label>Date</label>
+                        <input type="date" name="Date" value="{{ selected_date if selected_date <= today else today }}" max="{{ today }}" required>
+                    </div>
+                    <div>
+                        <label>Log entry for (user)</label>
+                        <select name="Logged_By" required>
+                            <option value="">-- choose user --</option>
+                            {% for u in users %}
+                            <option value="{{ u.Email }}">{{ u.Name or u.Email }} ({{ u.Email }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="row2">
+                    <div>
+                        <label>Select Employee (from master list)</label>
+                        <select id="adminEmpSelect" onchange="adminFillEmp()">
+                            <option value="">-- choose employee --</option>
+                            {% for m in master %}
+                            <option value="{{ loop.index0 }}"
+                                data-band="{{ m.Band or '' }}"
+                                data-empid="{{ m.Emp_Id or '' }}"
+                                data-empname="{{ m.Emp_Name or '' }}">
+                                {{ m.Emp_Id }} — {{ m.Emp_Name }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="row3">
+                    <div><label>Band</label><input type="text" name="Band" id="adminBand"></div>
+                    <div><label>Emp_Id</label><input type="text" name="Emp_Id" id="adminEmpId"></div>
+                    <div><label>Emp_Name</label><input type="text" name="Emp_Name" id="adminEmpName"></div>
+                </div>
+            </div>
+
+            <div id="adminProcessSection" class="card-section">
+                <div class="section-title">Process &amp; Hours</div>
+                <div id="adminProcessRows">
+                    <div class="row4 admin-process-row">
+                        <div>
+                            <select class="admin-proc-select">
+                                <option value="">-- select process --</option>
+                                {% for p in processes %}
+                                <option value="{{ p.Process }}">{{ p.Process }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div><input type="text" class="admin-proc-desc" placeholder="Description"></div>
+                        <div><input type="number" step="0.25" class="admin-proc-hr" placeholder="Hr"></div>
+                        <div><input type="number" step="1" class="admin-proc-count" placeholder="Count"></div>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-small" onclick="addAdminProcessRow()">+ Add another process row</button>
+            </div>
+            <input type="hidden" name="Process" id="adminProcess_hidden">
+            <input type="hidden" name="Description" id="adminDescription_hidden">
+            <input type="hidden" name="Hr" id="adminHr_hidden">
+            <input type="hidden" name="Count" id="adminCount_hidden">
+
+            <div class="card-section">
+                <div class="section-title">Additional Notes</div>
+                <div class="row2">
+                    <div><label>Other</label><input type="text" name="Other"></div>
+                    <div><label>Description</label><input type="text" name="Other_Description"></div>
+                </div>
+            </div>
+
+            <button type="submit" onclick="return collectAdminProcessRows()">Save Entry</button>
+        </form>
+    </div>
+
+    <script>
+    function adminFillEmp() {
+        var sel = document.getElementById('adminEmpSelect');
+        var opt = sel.options[sel.selectedIndex];
+        if (!opt || !opt.value) return;
+        document.getElementById('adminBand').value = opt.getAttribute('data-band');
+        document.getElementById('adminEmpId').value = opt.getAttribute('data-empid');
+        document.getElementById('adminEmpName').value = opt.getAttribute('data-empname');
+    }
+
+    function addAdminProcessRow() {
+        var container = document.getElementById('adminProcessRows');
+        var row = container.children[0].cloneNode(true);
+        row.querySelectorAll('input').forEach(function(el) { el.value = ''; });
+        row.querySelectorAll('select').forEach(function(el) { el.selectedIndex = 0; });
+        container.appendChild(row);
+    }
+
+    function collectAdminProcessRows() {
+        var rows = document.querySelectorAll('#adminProcessRows .admin-process-row');
+        var procs = [], descVals = [], hrVals = [], countVals = [];
+        rows.forEach(function(row) {
+            var p = row.querySelector('.admin-proc-select').value;
+            var d = row.querySelector('.admin-proc-desc').value;
+            var h = row.querySelector('.admin-proc-hr').value;
+            var c = row.querySelector('.admin-proc-count').value;
+            if (p) {
+                procs.push(p);
+                descVals.push(d);
+                hrVals.push(h);
+                countVals.push(c);
+            }
+        });
+        document.getElementById('adminProcess_hidden').value = procs.join('; ');
+        document.getElementById('adminDescription_hidden').value = descVals.join('; ');
+        document.getElementById('adminHr_hidden').value = hrVals.join('; ');
+        document.getElementById('adminCount_hidden').value = countVals.join('; ');
+        if (procs.length === 0) {
+            alert('Please select at least one process.');
+            return false;
+        }
+        return true;
+    }
+    </script>
 
     <div class="card">
         <h2>Productivity Count — {{ selected_date }}</h2>
@@ -1680,13 +1974,11 @@ def user_edit(date, row):
         back_url=url_for("user_home"), back_label="Back to your entries",
         logged_by_readonly=True
     )
-
-
 @app.route("/my/delete/<date>/<int:row>", methods=["POST"])
 @user_required
 def user_delete(date, row):
     """Same delete flow as admin_delete, but restricted to the user's own
-    submissions."""
+    submissions (Logged_By must match the logged-in user's email)."""
     records = get_records_for_date(date)
     record = next((r for r in records if r["_row"] == row), None)
     if record is None:
@@ -1698,6 +1990,8 @@ def user_delete(date, row):
     else:
         flash("Could not delete entry — sheet not found.", "error")
     return redirect(url_for("user_home"))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1742,8 +2036,37 @@ def admin_panel():
     return render_template_string(
         ADMIN_PAGE, dates=dates, selected_date=selected_date,
         records=records, fields=TRACKER_FIELDS, user_counts=user_counts,
-        months=months, selected_month=selected_month
+        months=months, selected_month=selected_month,
+        master=get_master_list(), processes=get_process_list(), users=get_users(),
+        today=today, leave_hr=LEAVE_HR, backups=list_backup_files(), use_postgres=USE_POSTGRES
     )
+
+
+@app.route("/admin/add-entry", methods=["POST"])
+@admin_required
+def admin_add_entry():
+    """Let admin add a New Entry on behalf of any user (chosen from the
+    'Log entry for' dropdown) and for any past or present date (not just
+    today) — e.g. to backfill 03/09/26 while today is 04/09/26. Future
+    dates are rejected, since there's no data to log yet for a day that
+    hasn't happened."""
+    entry_date = request.form.get("Date", "").strip() or now().strftime("%Y-%m-%d")
+    today_str = now().strftime("%Y-%m-%d")
+    if entry_date > today_str:
+        flash(f"Can't add an entry for a future date ({entry_date}). Today is {today_str}.", "error")
+        return redirect(url_for("admin_panel"))
+
+    logged_by = request.form.get("Logged_By", "").strip()
+    if not logged_by:
+        flash("Please choose which user to log this entry for.", "error")
+        return redirect(url_for("admin_panel", date=entry_date))
+
+    data = {key: request.form.get(key, "").strip() for key, _ in TRACKER_FIELDS if key != "Logged_By"}
+    data["Date"] = entry_date
+    data["Logged_By"] = logged_by
+    save_entry(data, sheet_date=entry_date)
+    flash(f"Entry added for {data.get('Emp_Name') or 'employee'} on {entry_date} (logged as {logged_by}).")
+    return redirect(url_for("admin_panel", date=entry_date))
 
 
 @app.route("/admin/edit/<date>/<int:row>", methods=["GET", "POST"])
@@ -1816,6 +2139,30 @@ def download_excel_month(month):
     return send_file(
         buf, as_attachment=True,
         download_name=f"productivity_tracker_{month}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+@app.route("/admin/backup-now", methods=["POST"])
+@admin_required
+def backup_now():
+    """Manually trigger the same backup the nightly job runs, so admin
+    doesn't have to wait until 11:55 PM to get a fresh backup file."""
+    path = backup_all_data_to_excel()
+    flash(f"Backup saved: {os.path.basename(path)}")
+    return redirect(url_for("admin_panel"))
+
+
+@app.route("/admin/backup/download/<filename>")
+@admin_required
+def download_backup(filename):
+    """Download a specific backup file by name. Filenames are validated
+    against the actual list of backups on disk, so this can't be used to
+    read arbitrary files on the server."""
+    if filename not in list_backup_files():
+        abort(404)
+    return send_file(
+        os.path.join(BACKUP_FOLDER, filename), as_attachment=True, download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
