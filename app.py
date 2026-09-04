@@ -941,7 +941,6 @@ USER_HOME_PAGE = """
         <h1>📊 LN Risk Map — Productivity Tracker</h1>
         <div>
             <span class="tag">Logged in as {{ user_name }} ({{ user_email }})</span>
-            <a href="{{ url_for('download_my_excel') }}">⬇ Download My Excel File</a>
             <a href="{{ url_for('user_logout') }}">Log out</a>
         </div>
     </div>
@@ -1047,7 +1046,7 @@ USER_HOME_PAGE = """
 
     <div class="card">
         <h2>Your Submissions — {{ today }}</h2>
-        <p class="note">You can edit entries you submitted today. Only an admin can delete an entry. Entries with more than one process are split into one row per process below.</p>
+        <p class="note">You can edit or delete entries you submitted today. Entries with more than one process are split into one row per process below.</p>
         {% if records %}
         <table>
             <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}<th>% of Day</th><th>Target hr%</th><th>Actions</th></tr>
@@ -1069,6 +1068,10 @@ USER_HOME_PAGE = """
                 {% if sub._is_first %}
                 <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>
                     <a class="btn btn-small" href="{{ url_for('user_edit', date=today, row=r['_row']) }}">Edit</a>
+                    <form style="display:inline" method="POST" action="{{ url_for('user_delete', date=today, row=r['_row']) }}"
+                          onsubmit="return confirm('Delete this entry?');">
+                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
+                    </form>
                 </td>
                 {% endif %}
             </tr>
@@ -1682,24 +1685,6 @@ def user_home():
     )
 
 
-@app.route("/my/download")
-@user_required
-def download_my_excel():
-    """Let a regular user download their own logged data, in the exact same
-    report format as the admin downloads (one row per process, Day Overall %
-    after Hr, % of Day / Target hr% at the end, Logged By hidden) — just
-    scoped to entries this user submitted, across every date they have any."""
-    ensure_workbook()
-    wb = build_report_workbook(list_available_dates(), logged_by_filter=session["user_email"])
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return send_file(
-        buf, as_attachment=True, download_name="my_productivity_data.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-
 @app.route("/submit", methods=["POST"])
 @user_required
 def submit():
@@ -1742,6 +1727,22 @@ def user_edit(date, row):
         back_url=url_for("user_home"), back_label="Back to your entries",
         logged_by_readonly=True
     )
+@app.route("/my/delete/<date>/<int:row>", methods=["POST"])
+@user_required
+def user_delete(date, row):
+    """Same delete flow as admin_delete, but restricted to the user's own
+    submissions (Logged_By must match the logged-in user's email)."""
+    records = get_records_for_date(date)
+    record = next((r for r in records if r["_row"] == row), None)
+    if record is None:
+        abort(404)
+    if record.get("Logged_By") != session["user_email"]:
+        abort(403)
+    if delete_record(date, row):
+        flash("Entry deleted.")
+    else:
+        flash("Could not delete entry — sheet not found.", "error")
+    return redirect(url_for("user_home"))
 
 
 
