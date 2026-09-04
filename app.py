@@ -40,6 +40,7 @@ already read from os.environ below, with local fallbacks).
 
 import os
 import io
+import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -61,7 +62,24 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 # Configuration
 # ---------------------------------------------------------------------------
 DATA_FOLDER = "tracker_data"
-EXCEL_FILE = os.path.join(DATA_FOLDER, "productivity_tracker.xlsx")
+
+# All app data (users, master list, process list, tracker entries) now lives
+# in a real SQLite database instead of an Excel file. The Excel workbook is
+# still produced on the fly for the "Download" buttons (see
+# build_report_workbook), but it is no longer the source of truth, so it can
+# never be the reason data disappears.
+#
+# IMPORTANT — persistence on hosted platforms (Heroku/Render/Railway/etc.):
+# a SQLite file is still just a file on the container's disk. Most hosting
+# platforms wipe the disk on every deploy/restart ("ephemeral filesystem").
+# To make data survive deploys/restarts you MUST point DB_PATH at storage
+# that persists outside the container — e.g.:
+#   - Render: add a "Disk" and set DB_PATH to a path under its mount
+#   - Railway: add a "Volume" and set DB_PATH to a path under its mount
+#   - Heroku: web dynos have NO persistent disk at all — you need an actual
+#     database service (e.g. Heroku Postgres) instead of a file, full stop
+# Locally (or with a mounted volume), the default below is fine as-is.
+DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_FOLDER, "tracker.db"))
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
@@ -128,7 +146,7 @@ CELL_FONT = Font(name="Arial")
 
 
 # ---------------------------------------------------------------------------
-# Excel helpers — generic
+# Excel helper — still used for the "Download" buttons only
 # ---------------------------------------------------------------------------
 def style_header(ws, columns, widths=None):
     for col_idx, header in enumerate(columns, start=1):
@@ -142,79 +160,69 @@ def style_header(ws, columns, widths=None):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
-def ensure_workbook():
-    """Create the workbook + folder + fixed sheets if they don't exist."""
+# ---------------------------------------------------------------------------
+# SQLite database — this is now the single source of truth for all data
+# (Users, Master, Process_List, and every date's tracker entries).
+# ---------------------------------------------------------------------------
+def get_db():
     os.makedirs(DATA_FOLDER, exist_ok=True)
-    if not os.path.exists(EXCEL_FILE):
-        wb = Workbook()
-        wb.active.title = "Info"
-        wb.active["A1"] = "LN Risk Map — Productivity Tracker. Data is stored in date-named sheets."
-        wb.save(EXCEL_FILE)
-
-    wb = load_workbook(EXCEL_FILE)
-    changed = False
-    if USERS_SHEET not in wb.sheetnames:
-        ws = wb.create_sheet(USERS_SHEET)
-        ws.append(USER_COLUMNS)
-        style_header(ws, USER_COLUMNS, [30, 18, 20])
-        changed = True
-    if MASTER_SHEET not in wb.sheetnames:
-        ws = wb.create_sheet(MASTER_SHEET)
-        ws.append(MASTER_COLUMNS)
-        style_header(ws, MASTER_COLUMNS, [10, 12, 20])
-        changed = True
-    if PROCESS_SHEET not in wb.sheetnames:
-        ws = wb.create_sheet(PROCESS_SHEET)
-        ws.append(PROCESS_COLUMNS)
-        style_header(ws, PROCESS_COLUMNS, [30, 14, 14])
-        changed = True
-    else:
-        # Migrate older Process_List sheets that predate the Target_Hr /
-        # Target_Pct columns by appending the missing headers.
-        ws = wb[PROCESS_SHEET]
-        existing_headers = [c.value for c in ws[1]]
-        for col_idx, col_name in enumerate(PROCESS_COLUMNS, start=1):
-            if col_idx > len(existing_headers) or existing_headers[col_idx - 1] != col_name:
-                cell = ws.cell(row=1, column=col_idx, value=col_name)
-                cell.font = HEADER_FONT
-                cell.fill = HEADER_FILL
-                cell.alignment = Alignment(horizontal="center")
-                changed = True
-    if changed:
-        wb.save(EXCEL_FILE)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def get_or_create_sheet(wb, sheet_name):
-    if sheet_name in wb.sheetnames:
-        return wb[sheet_name]
-    ws = wb.create_sheet(title=sheet_name)
-    ws.append(TRACKER_COLUMNS)
-    style_header(ws, TRACKER_COLUMNS, [12, 8, 10, 16, 16, 24, 12, 8, 24, 22, 10])
-    return ws
+def ensure_workbook():
+    """Create the SQLite database + folder + tables if they don't exist yet.
+    (Kept this function's original name since every route calls it before
+    touching data — only its implementation changed, from Excel to SQLite.)"""
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT, password TEXT, name TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS master (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            band TEXT, emp_id TEXT, emp_name TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS process_list (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            process TEXT, target_hr TEXT, target_pct TEXT, target_count_hr TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sheet_date TEXT,
+            date TEXT, band TEXT, emp_id TEXT, emp_name TEXT,
+            process TEXT, description TEXT, other TEXT, hr TEXT,
+            other_description TEXT, logged_by TEXT, count TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_sheet_date ON entries(sheet_date)")
+    conn.commit()
+    conn.close()
 
 
-def read_sheet_rows(sheet_name, columns):
-    """Generic reader: returns list of dicts (with _row) for a fixed sheet."""
-    if not os.path.exists(EXCEL_FILE):
-        return []
-    wb = load_workbook(EXCEL_FILE, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        return []
-    ws = wb[sheet_name]
-    rows = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if row and any(row):
-            record = dict(zip(columns, row))
-            record["_row"] = row_idx
-            rows.append(record)
-    return rows
+# db column name for each TRACKER_COLUMNS key, in the same order
+_ENTRY_DB_COLS = ["date", "band", "emp_id", "emp_name", "process", "description",
+                   "other", "hr", "other_description", "logged_by", "count"]
 
 
 # ---------------------------------------------------------------------------
 # Users (login accounts) helpers
 # ---------------------------------------------------------------------------
 def get_users():
-    return read_sheet_rows(USERS_SHEET, USER_COLUMNS)
+    ensure_workbook()
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+    conn.close()
+    return [{"Email": r["email"], "Password": r["password"], "Name": r["name"], "_row": r["id"]} for r in rows]
 
 
 def find_user_by_email(email):
@@ -226,104 +234,109 @@ def find_user_by_email(email):
 
 def add_user(email, password, name):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[USERS_SHEET]
-    ws.append([email, password, name])
-    row_idx = ws.max_row
-    for col_idx in range(1, len(USER_COLUMNS) + 1):
-        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute("INSERT INTO users (email, password, name) VALUES (?, ?, ?)", (email, password, name))
+    conn.commit()
+    conn.close()
 
 
 def update_user(row_idx, email, password, name):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[USERS_SHEET]
-    ws.cell(row=row_idx, column=1, value=email).font = CELL_FONT
-    ws.cell(row=row_idx, column=2, value=password).font = CELL_FONT
-    ws.cell(row=row_idx, column=3, value=name).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute("UPDATE users SET email=?, password=?, name=? WHERE id=?", (email, password, name, row_idx))
+    conn.commit()
+    conn.close()
 
 
 def delete_user(row_idx):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[USERS_SHEET]
-    ws.delete_rows(row_idx, 1)
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute("DELETE FROM users WHERE id=?", (row_idx,))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
 # Master employee list helpers
 # ---------------------------------------------------------------------------
 def get_master_list():
-    return read_sheet_rows(MASTER_SHEET, MASTER_COLUMNS)
+    ensure_workbook()
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM master ORDER BY id").fetchall()
+    conn.close()
+    return [{"Band": r["band"], "Emp_Id": r["emp_id"], "Emp_Name": r["emp_name"], "_row": r["id"]} for r in rows]
 
 
 def add_master(data):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[MASTER_SHEET]
-    row = [data.get(c, "") for c in MASTER_COLUMNS]
-    ws.append(row)
-    row_idx = ws.max_row
-    for col_idx in range(1, len(MASTER_COLUMNS) + 1):
-        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO master (band, emp_id, emp_name) VALUES (?, ?, ?)",
+        (data.get("Band", ""), data.get("Emp_Id", ""), data.get("Emp_Name", "")),
+    )
+    conn.commit()
+    conn.close()
 
 
 def update_master(row_idx, data):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[MASTER_SHEET]
-    for col_idx, col in enumerate(MASTER_COLUMNS, start=1):
-        ws.cell(row=row_idx, column=col_idx, value=data.get(col, "")).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute(
+        "UPDATE master SET band=?, emp_id=?, emp_name=? WHERE id=?",
+        (data.get("Band", ""), data.get("Emp_Id", ""), data.get("Emp_Name", ""), row_idx),
+    )
+    conn.commit()
+    conn.close()
 
 
 def delete_master(row_idx):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[MASTER_SHEET]
-    ws.delete_rows(row_idx, 1)
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute("DELETE FROM master WHERE id=?", (row_idx,))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
 # Process list helpers
 # ---------------------------------------------------------------------------
 def get_process_list():
-    return read_sheet_rows(PROCESS_SHEET, PROCESS_COLUMNS)
+    ensure_workbook()
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM process_list ORDER BY id").fetchall()
+    conn.close()
+    return [{"Process": r["process"], "Target_Hr": r["target_hr"], "Target_Pct": r["target_pct"],
+             "Target_Count_Hr": r["target_count_hr"], "_row": r["id"]} for r in rows]
 
 
 def add_process(name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[PROCESS_SHEET]
-    ws.append([name, target_hr, target_pct, target_count_hr])
-    row_idx = ws.max_row
-    for col_idx in range(1, len(PROCESS_COLUMNS) + 1):
-        ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO process_list (process, target_hr, target_pct, target_count_hr) VALUES (?, ?, ?, ?)",
+        (name, target_hr, target_pct, target_count_hr),
+    )
+    conn.commit()
+    conn.close()
 
 
 def update_process(row_idx, name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[PROCESS_SHEET]
-    ws.cell(row=row_idx, column=1, value=name).font = CELL_FONT
-    ws.cell(row=row_idx, column=2, value=target_hr).font = CELL_FONT
-    ws.cell(row=row_idx, column=3, value=target_pct).font = CELL_FONT
-    ws.cell(row=row_idx, column=4, value=target_count_hr).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute(
+        "UPDATE process_list SET process=?, target_hr=?, target_pct=?, target_count_hr=? WHERE id=?",
+        (name, target_hr, target_pct, target_count_hr, row_idx),
+    )
+    conn.commit()
+    conn.close()
 
 
 def delete_process(row_idx):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb[PROCESS_SHEET]
-    ws.delete_rows(row_idx, 1)
-    wb.save(EXCEL_FILE)
+    conn = get_db()
+    conn.execute("DELETE FROM process_list WHERE id=?", (row_idx,))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -331,34 +344,30 @@ def delete_process(row_idx):
 # ---------------------------------------------------------------------------
 def save_entry(data: dict):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
     today_str = now().strftime("%Y-%m-%d")
-    ws = get_or_create_sheet(wb, today_str)
+    conn = get_db()
+    values = [data.get(col, "") for col in TRACKER_COLUMNS]
+    conn.execute(
+        f"INSERT INTO entries (sheet_date, {', '.join(_ENTRY_DB_COLS)}) "
+        f"VALUES (?, {', '.join(['?'] * len(_ENTRY_DB_COLS))})",
+        [today_str] + values,
+    )
+    conn.commit()
+    conn.close()
 
-    row = [data.get(col, "") for col in TRACKER_COLUMNS]
-    ws.append(row)
 
-    new_row_idx = ws.max_row
-    for col_idx in range(1, len(TRACKER_COLUMNS) + 1):
-        ws.cell(row=new_row_idx, column=col_idx).font = CELL_FONT
-
-    wb.save(EXCEL_FILE)
+def _entry_row_to_record(row):
+    record = {col: row[db_col] for col, db_col in zip(TRACKER_COLUMNS, _ENTRY_DB_COLS)}
+    record["_row"] = row["id"]
+    return record
 
 
 def get_records_for_date(date_str):
-    if not os.path.exists(EXCEL_FILE):
-        return []
-    wb = load_workbook(EXCEL_FILE, data_only=True)
-    if date_str not in wb.sheetnames:
-        return []
-    ws = wb[date_str]
-    records = []
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if row and any(row):
-            record = dict(zip(TRACKER_COLUMNS, row))
-            record["_row"] = row_idx
-            records.append(record)
-    return records
+    ensure_workbook()
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM entries WHERE sheet_date=? ORDER BY id", (date_str,)).fetchall()
+    conn.close()
+    return [_entry_row_to_record(r) for r in rows]
 
 
 def get_today_records():
@@ -366,16 +375,17 @@ def get_today_records():
 
 
 def list_available_dates():
-    if not os.path.exists(EXCEL_FILE):
-        return []
-    wb = load_workbook(EXCEL_FILE, data_only=True)
-    dates = [name for name in wb.sheetnames if name not in RESERVED_SHEETS]
+    ensure_workbook()
+    conn = get_db()
+    rows = conn.execute("SELECT DISTINCT sheet_date FROM entries").fetchall()
+    conn.close()
+    dates = [r["sheet_date"] for r in rows if r["sheet_date"]]
     dates.sort(reverse=True)
     return dates
 
 
 def list_available_months():
-    """Distinct 'YYYY-MM' prefixes across all date-named sheets, newest first.
+    """Distinct 'YYYY-MM' prefixes across all logged dates, newest first.
     Used to populate the monthly-download dropdown in the admin panel."""
     months = sorted(
         {d[:7] for d in list_available_dates() if len(d) >= 7},
@@ -386,24 +396,29 @@ def list_available_months():
 
 def update_record(date_str, row_idx, data: dict):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    if date_str not in wb.sheetnames:
+    conn = get_db()
+    exists = conn.execute("SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str)).fetchone()
+    if not exists:
+        conn.close()
         return False
-    ws = wb[date_str]
-    for col_idx, col in enumerate(TRACKER_COLUMNS, start=1):
-        ws.cell(row=row_idx, column=col_idx, value=data.get(col, "")).font = CELL_FONT
-    wb.save(EXCEL_FILE)
+    values = [data.get(col, "") for col in TRACKER_COLUMNS]
+    set_clause = ", ".join(f"{db_col}=?" for db_col in _ENTRY_DB_COLS)
+    conn.execute(f"UPDATE entries SET {set_clause} WHERE id=?", values + [row_idx])
+    conn.commit()
+    conn.close()
     return True
 
 
 def delete_record(date_str, row_idx):
     ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    if date_str not in wb.sheetnames:
+    conn = get_db()
+    exists = conn.execute("SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str)).fetchone()
+    if not exists:
+        conn.close()
         return False
-    ws = wb[date_str]
-    ws.delete_rows(row_idx, 1)
-    wb.save(EXCEL_FILE)
+    conn.execute("DELETE FROM entries WHERE id=?", (row_idx,))
+    conn.commit()
+    conn.close()
     return True
 
 
@@ -630,19 +645,21 @@ def build_report_workbook(dates):
         ws = wb.create_sheet("Info")
         ws["A1"] = "No data available for the selected range."
 
-    if os.path.exists(EXCEL_FILE):
-        src = load_workbook(EXCEL_FILE, data_only=True)
-        for sheet_name in (MASTER_SHEET, PROCESS_SHEET):
-            if sheet_name in src.sheetnames:
-                dst = wb.create_sheet(sheet_name)
-                for row in src[sheet_name].iter_rows(values_only=True):
-                    dst.append(row)
-                columns = MASTER_COLUMNS if sheet_name == MASTER_SHEET else PROCESS_COLUMNS
-                widths = [10, 12, 20] if sheet_name == MASTER_SHEET else [30, 14, 14, 16]
-                style_header(dst, columns, widths)
-                for row_idx in range(2, dst.max_row + 1):
-                    for col_idx in range(1, len(columns) + 1):
-                        dst.cell(row=row_idx, column=col_idx).font = CELL_FONT
+    # Master + Process_List sheets, pulled live from the database (kept in
+    # the download for reference; Users/login accounts are never included).
+    for sheet_name, columns, widths, records in (
+        (MASTER_SHEET, MASTER_COLUMNS, [10, 12, 20], get_master_list()),
+        (PROCESS_SHEET, PROCESS_COLUMNS, [30, 14, 14, 16], processes),
+    ):
+        dst = wb.create_sheet(sheet_name)
+        dst.append(columns)
+        style_header(dst, columns, widths)
+        for record in records:
+            row = [record.get(col, "") for col in columns]
+            dst.append(row)
+            row_idx = dst.max_row
+            for col_idx in range(1, len(columns) + 1):
+                dst.cell(row=row_idx, column=col_idx).font = CELL_FONT
 
     return wb
 
