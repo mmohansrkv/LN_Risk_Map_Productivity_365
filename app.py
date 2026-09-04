@@ -84,6 +84,15 @@ if USE_POSTGRES:
     # Render's internal DATABASE_URL sometimes starts with "postgres://",
     # which older/newer driver combos can be picky about; psycopg2 accepts
     # either "postgres://" or "postgresql://" fine, so no rewrite needed.
+else:
+    print(
+        "[WARNING] DATABASE_URL is not set — using a local SQLite file at "
+        f"'{DB_PATH}'. On Render (and most hosts), the web service's own disk "
+        "is wiped on every redeploy AND every time the service restarts after "
+        "being idle, so all tracker data will be LOST without warning. "
+        "Attach a Render Postgres instance and set DATABASE_URL to its "
+        "'Internal Database URL' to make data persist."
+    )
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
@@ -1278,6 +1287,17 @@ ADMIN_PAGE = """
     </div>
     """ + FLASHES + """
 
+    {% if not use_postgres %}
+    <div class="flash" style="background:#fbeae7;color:#B94A3D;border:2px solid #B94A3D;font-weight:700;">
+        ⚠ DATA IS NOT SAVED PERMANENTLY. This app is running on a temporary SQLite
+        file, not a real database. Everything entered here — including this data —
+        will be LOST the next time the server restarts (which can happen after just
+        a few minutes of no traffic). Set the <code>DATABASE_URL</code> environment
+        variable to a persistent Postgres database to fix this. Ask your developer
+        to attach one on the hosting dashboard.
+    </div>
+    {% endif %}
+
     <div class="card">
         <form method="GET" action="{{ url_for('admin_panel') }}">
             <label>Select date</label>
@@ -2018,7 +2038,7 @@ def admin_panel():
         records=records, fields=TRACKER_FIELDS, user_counts=user_counts,
         months=months, selected_month=selected_month,
         master=get_master_list(), processes=get_process_list(), users=get_users(),
-        today=today, leave_hr=LEAVE_HR, backups=list_backup_files()
+        today=today, leave_hr=LEAVE_HR, backups=list_backup_files(), use_postgres=USE_POSTGRES
     )
 
 
