@@ -63,23 +63,27 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 # ---------------------------------------------------------------------------
 DATA_FOLDER = "tracker_data"
 
-# All app data (users, master list, process list, tracker entries) now lives
-# in a real SQLite database instead of an Excel file. The Excel workbook is
-# still produced on the fly for the "Download" buttons (see
-# build_report_workbook), but it is no longer the source of truth, so it can
-# never be the reason data disappears.
+# All app data (users, master list, process list, tracker entries) lives in a
+# real database instead of an Excel file, so it's no longer at risk of being
+# wiped by a redeploy.
 #
-# IMPORTANT — persistence on hosted platforms (Heroku/Render/Railway/etc.):
-# a SQLite file is still just a file on the container's disk. Most hosting
-# platforms wipe the disk on every deploy/restart ("ephemeral filesystem").
-# To make data survive deploys/restarts you MUST point DB_PATH at storage
-# that persists outside the container — e.g.:
-#   - Render: add a "Disk" and set DB_PATH to a path under its mount
-#   - Railway: add a "Volume" and set DB_PATH to a path under its mount
-#   - Heroku: web dynos have NO persistent disk at all — you need an actual
-#     database service (e.g. Heroku Postgres) instead of a file, full stop
-# Locally (or with a mounted volume), the default below is fine as-is.
+# On Render, a web service's own disk is wiped on every deploy/restart — but
+# a separate Render Postgres database is persistent. Set the DATABASE_URL
+# environment variable on the web service (Render dashboard -> your web
+# service -> Environment) to the "Internal Database URL" shown on your
+# Postgres instance's page, and the app will use it automatically.
+# If DATABASE_URL isn't set (e.g. running locally), it falls back to a
+# SQLite file at DB_PATH.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_POSTGRES = bool(DATABASE_URL)
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_FOLDER, "tracker.db"))
+
+if USE_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+    # Render's internal DATABASE_URL sometimes starts with "postgres://",
+    # which older/newer driver combos can be picky about; psycopg2 accepts
+    # either "postgres://" or "postgresql://" fine, so no rewrite needed.
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Mobius@123")
@@ -165,46 +169,66 @@ def style_header(ws, columns, widths=None):
 # (Users, Master, Process_List, and every date's tracker entries).
 # ---------------------------------------------------------------------------
 def get_db():
-    os.makedirs(DATA_FOLDER, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        os.makedirs(DATA_FOLDER, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
     return conn
 
 
+def q(conn, sql, params=(), fetch=None):
+    """Run a query against either backend. `sql` is written with SQLite-style
+    '?' placeholders and translated to Postgres '%s' automatically.
+    fetch: None (no result needed), "one", or "all"."""
+    if USE_POSTGRES:
+        sql = sql.replace("?", "%s")
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        result = cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+        cur.close()
+        return result
+    else:
+        cur = conn.execute(sql, params)
+        return cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+
+
 def ensure_workbook():
-    """Create the SQLite database + folder + tables if they don't exist yet.
+    """Create the database + folder + tables if they don't exist yet.
     (Kept this function's original name since every route calls it before
-    touching data — only its implementation changed, from Excel to SQLite.)"""
-    os.makedirs(DATA_FOLDER, exist_ok=True)
+    touching data — only its implementation changed, from Excel to a real
+    database, SQLite locally or Postgres in production.)"""
     conn = get_db()
-    conn.execute("""
+    pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    q(conn, f"""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             email TEXT, password TEXT, name TEXT
         )
     """)
-    conn.execute("""
+    q(conn, f"""
         CREATE TABLE IF NOT EXISTS master (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             band TEXT, emp_id TEXT, emp_name TEXT
         )
     """)
-    conn.execute("""
+    q(conn, f"""
         CREATE TABLE IF NOT EXISTS process_list (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             process TEXT, target_hr TEXT, target_pct TEXT, target_count_hr TEXT
         )
     """)
-    conn.execute("""
+    q(conn, f"""
         CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             sheet_date TEXT,
             date TEXT, band TEXT, emp_id TEXT, emp_name TEXT,
             process TEXT, description TEXT, other TEXT, hr TEXT,
             other_description TEXT, logged_by TEXT, count TEXT
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_sheet_date ON entries(sheet_date)")
+    q(conn, "CREATE INDEX IF NOT EXISTS idx_entries_sheet_date ON entries(sheet_date)")
     conn.commit()
     conn.close()
 
@@ -220,7 +244,7 @@ _ENTRY_DB_COLS = ["date", "band", "emp_id", "emp_name", "process", "description"
 def get_users():
     ensure_workbook()
     conn = get_db()
-    rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+    rows = q(conn, "SELECT * FROM users ORDER BY id", fetch="all")
     conn.close()
     return [{"Email": r["email"], "Password": r["password"], "Name": r["name"], "_row": r["id"]} for r in rows]
 
@@ -235,7 +259,7 @@ def find_user_by_email(email):
 def add_user(email, password, name):
     ensure_workbook()
     conn = get_db()
-    conn.execute("INSERT INTO users (email, password, name) VALUES (?, ?, ?)", (email, password, name))
+    q(conn, "INSERT INTO users (email, password, name) VALUES (?, ?, ?)", (email, password, name))
     conn.commit()
     conn.close()
 
@@ -243,7 +267,7 @@ def add_user(email, password, name):
 def update_user(row_idx, email, password, name):
     ensure_workbook()
     conn = get_db()
-    conn.execute("UPDATE users SET email=?, password=?, name=? WHERE id=?", (email, password, name, row_idx))
+    q(conn, "UPDATE users SET email=?, password=?, name=? WHERE id=?", (email, password, name, row_idx))
     conn.commit()
     conn.close()
 
@@ -251,7 +275,7 @@ def update_user(row_idx, email, password, name):
 def delete_user(row_idx):
     ensure_workbook()
     conn = get_db()
-    conn.execute("DELETE FROM users WHERE id=?", (row_idx,))
+    q(conn, "DELETE FROM users WHERE id=?", (row_idx,))
     conn.commit()
     conn.close()
 
@@ -262,7 +286,7 @@ def delete_user(row_idx):
 def get_master_list():
     ensure_workbook()
     conn = get_db()
-    rows = conn.execute("SELECT * FROM master ORDER BY id").fetchall()
+    rows = q(conn, "SELECT * FROM master ORDER BY id", fetch="all")
     conn.close()
     return [{"Band": r["band"], "Emp_Id": r["emp_id"], "Emp_Name": r["emp_name"], "_row": r["id"]} for r in rows]
 
@@ -270,7 +294,7 @@ def get_master_list():
 def add_master(data):
     ensure_workbook()
     conn = get_db()
-    conn.execute(
+    q(conn,
         "INSERT INTO master (band, emp_id, emp_name) VALUES (?, ?, ?)",
         (data.get("Band", ""), data.get("Emp_Id", ""), data.get("Emp_Name", "")),
     )
@@ -281,7 +305,7 @@ def add_master(data):
 def update_master(row_idx, data):
     ensure_workbook()
     conn = get_db()
-    conn.execute(
+    q(conn,
         "UPDATE master SET band=?, emp_id=?, emp_name=? WHERE id=?",
         (data.get("Band", ""), data.get("Emp_Id", ""), data.get("Emp_Name", ""), row_idx),
     )
@@ -292,7 +316,7 @@ def update_master(row_idx, data):
 def delete_master(row_idx):
     ensure_workbook()
     conn = get_db()
-    conn.execute("DELETE FROM master WHERE id=?", (row_idx,))
+    q(conn, "DELETE FROM master WHERE id=?", (row_idx,))
     conn.commit()
     conn.close()
 
@@ -303,7 +327,7 @@ def delete_master(row_idx):
 def get_process_list():
     ensure_workbook()
     conn = get_db()
-    rows = conn.execute("SELECT * FROM process_list ORDER BY id").fetchall()
+    rows = q(conn, "SELECT * FROM process_list ORDER BY id", fetch="all")
     conn.close()
     return [{"Process": r["process"], "Target_Hr": r["target_hr"], "Target_Pct": r["target_pct"],
              "Target_Count_Hr": r["target_count_hr"], "_row": r["id"]} for r in rows]
@@ -312,7 +336,7 @@ def get_process_list():
 def add_process(name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
     conn = get_db()
-    conn.execute(
+    q(conn,
         "INSERT INTO process_list (process, target_hr, target_pct, target_count_hr) VALUES (?, ?, ?, ?)",
         (name, target_hr, target_pct, target_count_hr),
     )
@@ -323,7 +347,7 @@ def add_process(name, target_hr="", target_pct="", target_count_hr=""):
 def update_process(row_idx, name, target_hr="", target_pct="", target_count_hr=""):
     ensure_workbook()
     conn = get_db()
-    conn.execute(
+    q(conn,
         "UPDATE process_list SET process=?, target_hr=?, target_pct=?, target_count_hr=? WHERE id=?",
         (name, target_hr, target_pct, target_count_hr, row_idx),
     )
@@ -334,7 +358,7 @@ def update_process(row_idx, name, target_hr="", target_pct="", target_count_hr="
 def delete_process(row_idx):
     ensure_workbook()
     conn = get_db()
-    conn.execute("DELETE FROM process_list WHERE id=?", (row_idx,))
+    q(conn, "DELETE FROM process_list WHERE id=?", (row_idx,))
     conn.commit()
     conn.close()
 
@@ -347,7 +371,7 @@ def save_entry(data: dict):
     today_str = now().strftime("%Y-%m-%d")
     conn = get_db()
     values = [data.get(col, "") for col in TRACKER_COLUMNS]
-    conn.execute(
+    q(conn,
         f"INSERT INTO entries (sheet_date, {', '.join(_ENTRY_DB_COLS)}) "
         f"VALUES (?, {', '.join(['?'] * len(_ENTRY_DB_COLS))})",
         [today_str] + values,
@@ -365,7 +389,7 @@ def _entry_row_to_record(row):
 def get_records_for_date(date_str):
     ensure_workbook()
     conn = get_db()
-    rows = conn.execute("SELECT * FROM entries WHERE sheet_date=? ORDER BY id", (date_str,)).fetchall()
+    rows = q(conn, "SELECT * FROM entries WHERE sheet_date=? ORDER BY id", (date_str,), fetch="all")
     conn.close()
     return [_entry_row_to_record(r) for r in rows]
 
@@ -377,7 +401,7 @@ def get_today_records():
 def list_available_dates():
     ensure_workbook()
     conn = get_db()
-    rows = conn.execute("SELECT DISTINCT sheet_date FROM entries").fetchall()
+    rows = q(conn, "SELECT DISTINCT sheet_date FROM entries", fetch="all")
     conn.close()
     dates = [r["sheet_date"] for r in rows if r["sheet_date"]]
     dates.sort(reverse=True)
@@ -397,13 +421,13 @@ def list_available_months():
 def update_record(date_str, row_idx, data: dict):
     ensure_workbook()
     conn = get_db()
-    exists = conn.execute("SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str)).fetchone()
+    exists = q(conn, "SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str), fetch="one")
     if not exists:
         conn.close()
         return False
     values = [data.get(col, "") for col in TRACKER_COLUMNS]
     set_clause = ", ".join(f"{db_col}=?" for db_col in _ENTRY_DB_COLS)
-    conn.execute(f"UPDATE entries SET {set_clause} WHERE id=?", values + [row_idx])
+    q(conn, f"UPDATE entries SET {set_clause} WHERE id=?", values + [row_idx])
     conn.commit()
     conn.close()
     return True
@@ -412,11 +436,11 @@ def update_record(date_str, row_idx, data: dict):
 def delete_record(date_str, row_idx):
     ensure_workbook()
     conn = get_db()
-    exists = conn.execute("SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str)).fetchone()
+    exists = q(conn, "SELECT id FROM entries WHERE id=? AND sheet_date=?", (row_idx, date_str), fetch="one")
     if not exists:
         conn.close()
         return False
-    conn.execute("DELETE FROM entries WHERE id=?", (row_idx,))
+    q(conn, "DELETE FROM entries WHERE id=?", (row_idx,))
     conn.commit()
     conn.close()
     return True
