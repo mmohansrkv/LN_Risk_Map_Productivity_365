@@ -590,6 +590,7 @@ def expand_record_rows(record, target_lookup=None):
         except ValueError:
             parsed_hrs.append(0.0)
     total_hr = sum(parsed_hrs)
+    day_pct = round((total_hr / WORK_HOURS_PER_DAY) * 100) if WORK_HOURS_PER_DAY > 0 else 0
 
     rows = []
     for idx, (p, d, h, c) in enumerate(raw):
@@ -615,6 +616,7 @@ def expand_record_rows(record, target_lookup=None):
         sub["Hr"] = h
         sub["Count"] = c
         sub["_pct"] = pct
+        sub["_day_pct"] = day_pct
         sub["_target_hr"] = target.get("Target_Hr") or ""
         sub["_target_pct"] = target.get("Target_Pct") or ""
         sub["_target_count_hr"] = target_count_hr
@@ -625,23 +627,50 @@ def expand_record_rows(record, target_lookup=None):
     return rows
 
 
-REPORT_COLUMNS = [label for _, label in TRACKER_FIELDS] + ["% of Day", "Target hr%"]
-REPORT_COLUMN_WIDTHS = [12, 8, 10, 16, 16, 24, 10, 8, 24, 22, 10, 10, 12]
+REPORT_COLUMNS = (
+    [label for _, label in TRACKER_FIELDS[:8]]      # ... up through "Hr"
+    + ["Day Overall %"]
+    + [label for _, label in TRACKER_FIELDS[8:]]    # Description, Logged By, Count
+    + ["% of Day", "Target hr%"]
+)
+REPORT_COLUMN_WIDTHS = [12, 8, 10, 16, 16, 24, 10, 8, 14, 24, 22, 10, 10, 12]
+REPORT_HR_INSERT_AT = 8          # 0-based position where Day Overall % lands
+REPORT_LOGGED_BY_COLUMN = "Logged By"
 
 
-def build_report_sheet(wb, date_str, target_lookup):
-    """Add one sheet named `date_str` to `wb`, formatted exactly like the
-    admin panel's Records table: one row per process (entries with more
-    than one process are split), plus '% of Day' and 'Target hr%' columns
-    computed the same way expand_record_rows computes them on-screen."""
+def build_report_sheet(wb, date_str, target_lookup, logged_by_filter=None):
+    """Add one sheet named `date_str` to `wb`, formatted like the admin
+    panel's Records table: one row per process (entries with more than one
+    process are split), a 'Day Overall %' column right after Hr (the
+    entry's total logged Hr as a % of the 8-hr work day), and '% of Day' /
+    'Target hr%' columns at the end. The Logged By column is kept in the
+    data but hidden, so it isn't shown unless a viewer un-hides it.
+
+    If `logged_by_filter` is given, only that user's own entries for the
+    date are included — used for the "download my data" button on the
+    regular user's page, so each user can export just their own records
+    in the exact same report format admin downloads use. Returns True if
+    the sheet ended up with at least one data row, False otherwise (so
+    callers can skip/remove empty sheets, e.g. dates with no data for
+    the filtered user)."""
     ws = wb.create_sheet(title=date_str)
     ws.append(REPORT_COLUMNS)
     style_header(ws, REPORT_COLUMNS, REPORT_COLUMN_WIDTHS)
 
     records = get_records_for_date(date_str)
+    if logged_by_filter is not None:
+        records = [r for r in records if r.get("Logged_By") == logged_by_filter]
+
+    has_rows = False
     for record in records:
         for sub in expand_record_rows(record, target_lookup):
-            row = [sub.get(key, "") for key, _ in TRACKER_FIELDS]
+            base_values = [sub.get(key, "") for key, _ in TRACKER_FIELDS]
+            day_pct = sub.get("_day_pct")
+            row = (
+                base_values[:REPORT_HR_INSERT_AT]
+                + [f"{day_pct}%" if day_pct != "" else ""]
+                + base_values[REPORT_HR_INSERT_AT:]
+            )
             row.append(f"{sub['_pct']}%" if sub.get("_pct") != "" else "")
             target_hr_pct = sub.get("_target_hr_pct")
             row.append(f"{target_hr_pct}%" if target_hr_pct != "" else "")
@@ -649,25 +678,43 @@ def build_report_sheet(wb, date_str, target_lookup):
             row_idx = ws.max_row
             for col_idx in range(1, len(REPORT_COLUMNS) + 1):
                 ws.cell(row=row_idx, column=col_idx).font = CELL_FONT
-    return ws
+            has_rows = True
+
+    logged_by_col = REPORT_COLUMNS.index(REPORT_LOGGED_BY_COLUMN) + 1
+    ws.column_dimensions[get_column_letter(logged_by_col)].hidden = True
+    return has_rows
 
 
-def build_report_workbook(dates):
+def build_report_workbook(dates, logged_by_filter=None):
     """Build a fresh workbook with one report-style sheet per date in
     `dates` (see build_report_sheet), plus the Master and Process_List
-    sheets kept at the end for reference. No Users sheet is ever included."""
+    sheets kept at the end for reference. No Users sheet is ever included.
+
+    If `logged_by_filter` is set (a user's email), each date sheet only
+    contains that user's own entries, dates with none of their entries are
+    dropped entirely, and the Master/Process_List reference sheets are left
+    out — this is the "download my data" case for the regular user page,
+    as opposed to the admin's full/monthly downloads."""
     wb = Workbook()
     wb.remove(wb.active)
 
     processes = get_process_list()
     target_lookup = {p["Process"]: p for p in processes if p.get("Process")}
 
+    any_rows = False
     for date_str in sorted(dates):
-        build_report_sheet(wb, date_str, target_lookup)
+        has_rows = build_report_sheet(wb, date_str, target_lookup, logged_by_filter)
+        if logged_by_filter is not None and not has_rows:
+            del wb[date_str]
+        else:
+            any_rows = any_rows or has_rows
 
-    if not dates:
+    if not dates or (logged_by_filter is not None and not any_rows):
         ws = wb.create_sheet("Info")
         ws["A1"] = "No data available for the selected range."
+
+    if logged_by_filter is not None:
+        return wb
 
     # Master + Process_List sheets, pulled live from the database (kept in
     # the download for reference; Users/login accounts are never included).
@@ -894,6 +941,7 @@ USER_HOME_PAGE = """
         <h1>📊 LN Risk Map — Productivity Tracker</h1>
         <div>
             <span class="tag">Logged in as {{ user_name }} ({{ user_email }})</span>
+            <a href="{{ url_for('download_my_excel') }}">⬇ Download My Excel File</a>
             <a href="{{ url_for('user_logout') }}">Log out</a>
         </div>
     </div>
@@ -999,7 +1047,7 @@ USER_HOME_PAGE = """
 
     <div class="card">
         <h2>Your Submissions — {{ today }}</h2>
-        <p class="note">You can edit or delete entries you submitted today. Entries with more than one process are split into one row per process below.</p>
+        <p class="note">You can edit entries you submitted today. Only an admin can delete an entry. Entries with more than one process are split into one row per process below.</p>
         {% if records %}
         <table>
             <tr>{% for _, label in fields %}<th>{{ label }}</th>{% endfor %}<th>% of Day</th><th>Target hr%</th><th>Actions</th></tr>
@@ -1021,10 +1069,6 @@ USER_HOME_PAGE = """
                 {% if sub._is_first %}
                 <td{% if sub._group_size > 1 %} rowspan="{{ sub._group_size }}"{% endif %}>
                     <a class="btn btn-small" href="{{ url_for('user_edit', date=today, row=r['_row']) }}">Edit</a>
-                    <form style="display:inline" method="POST" action="{{ url_for('user_delete', date=today, row=r['_row']) }}"
-                          onsubmit="return confirm('Delete this entry?');">
-                        <button class="btn btn-small btn-danger" type="submit">Delete</button>
-                    </form>
                 </td>
                 {% endif %}
             </tr>
@@ -1638,6 +1682,24 @@ def user_home():
     )
 
 
+@app.route("/my/download")
+@user_required
+def download_my_excel():
+    """Let a regular user download their own logged data, in the exact same
+    report format as the admin downloads (one row per process, Day Overall %
+    after Hr, % of Day / Target hr% at the end, Logged By hidden) — just
+    scoped to entries this user submitted, across every date they have any."""
+    ensure_workbook()
+    wb = build_report_workbook(list_available_dates(), logged_by_filter=session["user_email"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf, as_attachment=True, download_name="my_productivity_data.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 @app.route("/submit", methods=["POST"])
 @user_required
 def submit():
@@ -1682,22 +1744,6 @@ def user_edit(date, row):
     )
 
 
-@app.route("/my/delete/<date>/<int:row>", methods=["POST"])
-@user_required
-def user_delete(date, row):
-    """Same delete flow as admin_delete, but restricted to the user's own
-    submissions."""
-    records = get_records_for_date(date)
-    record = next((r for r in records if r["_row"] == row), None)
-    if record is None:
-        abort(404)
-    if record.get("Logged_By") != session["user_email"]:
-        abort(403)
-    if delete_record(date, row):
-        flash("Entry deleted.")
-    else:
-        flash("Could not delete entry — sheet not found.", "error")
-    return redirect(url_for("user_home"))
 
 
 # ---------------------------------------------------------------------------
