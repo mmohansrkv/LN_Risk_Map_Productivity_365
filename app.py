@@ -1340,7 +1340,7 @@ ADMIN_PAGE = """
                 <div class="row2">
                     <div>
                         <label>Date</label>
-                        <input type="date" name="Date" value="{{ selected_date }}" required>
+                        <input type="date" name="Date" value="{{ selected_date if selected_date <= today else today }}" max="{{ today }}" required>
                     </div>
                     <div>
                         <label>Log entry for (user)</label>
@@ -2026,9 +2026,16 @@ def admin_panel():
 @admin_required
 def admin_add_entry():
     """Let admin add a New Entry on behalf of any user (chosen from the
-    'Log entry for' dropdown) and for any date (not just today) — e.g. to
-    backfill 03/09/26 while today is 04/09/26."""
+    'Log entry for' dropdown) and for any past or present date (not just
+    today) — e.g. to backfill 03/09/26 while today is 04/09/26. Future
+    dates are rejected, since there's no data to log yet for a day that
+    hasn't happened."""
     entry_date = request.form.get("Date", "").strip() or now().strftime("%Y-%m-%d")
+    today_str = now().strftime("%Y-%m-%d")
+    if entry_date > today_str:
+        flash(f"Can't add an entry for a future date ({entry_date}). Today is {today_str}.", "error")
+        return redirect(url_for("admin_panel"))
+
     logged_by = request.form.get("Logged_By", "").strip()
     if not logged_by:
         flash("Please choose which user to log this entry for.", "error")
