@@ -794,54 +794,59 @@ BASE_STYLE = """
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
     :root {
-        --ink: #1b2430; --ink-soft: #5b6472; --line: #dfe3ea;
-        --primary: #2c4a80; --primary-dark: #1f3660; --primary-tint: #eef2f9;
-        --amber: #b8860b; --amber-tint: #fdf6e3;
-        --green: #1e7a4c; --green-tint: #e9f7ef;
-        --red: #b0362c; --red-tint: #fbeae8;
-        --surface: #ffffff; --canvas: #f2f4f8;
+        --ink: #1B2A3D; --ink-soft: #33445A; --line: #DCDFD8;
+        --primary: #D98E2B; --primary-dark: #B8741C; --primary-tint: #FBEFDD;
+        --amber: #D98E2B; --amber-tint: #FBEFDD;
+        --green: #3F7268; --green-tint: #E7F0EE;
+        --red: #B94A3D; --red-tint: #FBEAE7;
+        --surface: #FFFFFF; --canvas: #F6F5F1;
     }
     * { box-sizing: border-box; }
-    body { font-family: 'Inter', Arial, sans-serif; max-width: 1000px; margin: 28px auto; background: var(--canvas); color: var(--ink); }
-    h1 { font-family: 'Manrope', Arial, sans-serif; font-weight: 800; color: var(--primary-dark); letter-spacing: -0.01em; margin: 0; }
+    body { font-family: 'Segoe UI', 'Inter', -apple-system, BlinkMacSystemFont, Arial, sans-serif; max-width: 1000px; margin: 28px auto; background: var(--canvas); color: #20262E; }
+    h1 { font-family: 'Manrope', Arial, sans-serif; font-weight: 800; color: var(--ink); letter-spacing: -0.01em; margin: 0; }
     h2 { font-family: 'Manrope', Arial, sans-serif; font-weight: 700; color: var(--ink); font-size: 16px; margin: 0 0 4px; }
-    .card { background: var(--surface); padding: 22px 24px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 20px; }
+    .card { background: var(--surface); padding: 22px 24px; border-radius: 4px; border: 1px solid var(--line); margin-bottom: 20px; }
     .card-section { border-left: 3px solid var(--primary); padding-left: 18px; margin-top: 18px; }
     .card-section:first-of-type { margin-top: 4px; }
-    .section-title { font-family: 'Manrope', Arial, sans-serif; font-weight: 700; font-size: 13px; color: var(--primary-dark);
+    .section-title { font-family: 'Manrope', Arial, sans-serif; font-weight: 700; font-size: 12px; color: var(--green);
         text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
-    label { display: block; margin-top: 12px; font-weight: 600; font-size: 13.5px; color: var(--ink-soft); }
+    label { display: block; margin-top: 12px; font-weight: 600; font-size: 13px; color: #5C6773; }
     input[type=text], input[type=date], input[type=number], input[type=password], input[type=email], select {
-        width: 100%; padding: 9px 10px; margin-top: 5px; border: 1px solid var(--line); border-radius: 6px;
-        box-sizing: border-box; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: var(--ink); background: #fff;
+        width: 100%; padding: 9px 10px; margin-top: 5px; border: 1px solid var(--line); border-radius: 3px;
+        box-sizing: border-box; font-family: 'Segoe UI', 'Inter', Arial, sans-serif; font-size: 14px; color: #20262E; background: #fff;
     }
     input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); }
     .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
     .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
     .row4 { display: grid; grid-template-columns: 1.4fr 1fr 0.7fr 0.7fr; gap: 0 16px; }
-    button, .btn { margin-top: 18px; padding: 10px 22px; background: var(--primary); color: white; border: none;
-        border-radius: 6px; font-size: 14.5px; font-weight: 600; cursor: pointer; text-decoration: none; display: inline-block;
-        font-family: 'Inter', Arial, sans-serif; }
+    button, .btn { margin-top: 18px; padding: 9px 20px; background: var(--primary); color: #2b1c07; border: none;
+        border-radius: 3px; font-size: 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block;
+        font-family: 'Segoe UI', 'Inter', Arial, sans-serif; }
     button:hover, .btn:hover { background: var(--primary-dark); }
-    .btn-danger { background: var(--red); }
-    .btn-danger:hover { background: #8f2e2e; }
-    .btn-small { padding: 5px 12px; font-size: 13px; margin: 0 4px 0 0; }
+    .btn-danger { background: #fff; color: var(--red); border: 1px solid var(--red); }
+    .btn-danger:hover { background: var(--red); color: #fff; }
+    .btn-small { padding: 5px 12px; font-size: 12px; margin: 0 4px 0 0; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { border: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: left; }
-    th { background: var(--primary-tint); color: var(--primary-dark); font-weight: 700; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.03em; }
-    .flash { padding: 10px 14px; background: var(--green-tint); color: var(--green); border-radius: 6px; margin-bottom: 16px; font-weight: 500; }
+    th, td { border: none; border-bottom: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: left; }
+    th { background: var(--ink); color: #fff; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+    tbody tr:nth-child(even) { background: #FAFAF7; }
+    tbody tr:hover { background: #F1EFE7; }
+    .flash { padding: 10px 14px; background: var(--green-tint); color: var(--green); border-radius: 3px; margin-bottom: 16px; font-weight: 500; }
     .flash-error { background: var(--red-tint); color: var(--red); }
-    .note { font-size: 13px; color: var(--ink-soft); }
+    .note { font-size: 13px; color: #5C6773; }
     .topbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
-        background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 22px; margin-bottom: 20px; }
-    .topbar a { color: var(--primary); text-decoration: none; font-size: 14px; margin-left: 12px; font-weight: 600; }
-    .tag { display: inline-block; background: var(--primary-tint); color: var(--primary-dark); padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
-    .proc-target { font-size: 12px; color: var(--primary-dark); font-weight: 600; margin-top: 4px; min-height: 16px; }
+        background: var(--ink); color: #fff; border-radius: 4px; padding: 16px 22px; margin-bottom: 20px; }
+    .topbar h1 { color: #fff; }
+    .topbar a { color: #fff; text-decoration: none; font-size: 13px; margin-left: 12px; font-weight: 600; border: 1px solid #3E5065; padding: 5px 10px; border-radius: 3px; }
+    .topbar a:hover { background: #2A3A4E; }
+    .tag { display: inline-block; background: var(--primary); color: #2b1c07; padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+    .proc-target { font-size: 12px; color: var(--green); font-weight: 600; margin-top: 4px; min-height: 16px; }
     body.login-page { max-width: 380px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
-        justify-content: center; padding: 16px; }
-    body.login-page h1 { text-align: center; font-size: 20px; margin: 0 0 14px; }
-    body.login-page .card { padding: 16px; margin-bottom: 14px; }
+        justify-content: center; padding: 16px; background: var(--canvas); }
+    body.login-page h1 { text-align: center; font-size: 20px; margin: 0 0 14px; color: var(--ink); }
+    body.login-page .card { padding: 20px 22px; margin-bottom: 14px; border-radius: 4px; box-shadow: 0 12px 40px rgba(27,42,61,0.18); }
     body.login-page p { text-align: center; margin: 0; }
+    body.login-page p a { color: var(--ink); font-weight: 600; }
 </style>
 """
 
