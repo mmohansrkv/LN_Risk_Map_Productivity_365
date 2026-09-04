@@ -67,11 +67,21 @@ DATA_FOLDER = "tracker_data"
 # real database instead of an Excel file, so it's no longer at risk of being
 # wiped by a redeploy.
 #
-# On Render, a web service's own disk is wiped on every deploy/restart — but
-# a separate Render Postgres database is persistent. Set the DATABASE_URL
-# environment variable on the web service (Render dashboard -> your web
-# service -> Environment) to the "Internal Database URL" shown on your
-# Postgres instance's page, and the app will use it automatically.
+# The web service's own disk (Render, Railway, etc.) is wiped on every
+# deploy/restart — but a separate Postgres database is persistent. Supabase
+# offers a free, permanently-hosted Postgres database and is the recommended
+# option here (Render's free Postgres expires after 30 days; Supabase's does
+# not). To use it:
+#   1. Create a project at https://supabase.com (free tier is fine).
+#   2. Go to Project Settings -> Database -> Connection string.
+#   3. Use the "Connection pooling" URI (Transaction mode, port 6543) rather
+#      than the direct connection (port 5432) — most hosts (Render, Railway,
+#      Heroku) can only reach Supabase over IPv4, and the pooler is IPv4;
+#      the direct connection is IPv6-only on most Supabase projects and will
+#      hang or fail to resolve from those hosts.
+#   4. Set that URI as the DATABASE_URL environment variable on your web
+#      service, with [YOUR-PASSWORD] replaced by your actual database
+#      password. The app will use it automatically.
 # If DATABASE_URL isn't set (e.g. running locally), it falls back to a
 # SQLite file at DB_PATH.
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -81,17 +91,29 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_FOLDER, "tracker.db"))
 if USE_POSTGRES:
     import psycopg2
     import psycopg2.extras
-    # Render's internal DATABASE_URL sometimes starts with "postgres://",
-    # which older/newer driver combos can be picky about; psycopg2 accepts
-    # either "postgres://" or "postgresql://" fine, so no rewrite needed.
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+    # Supabase (and Postgres in general) requires SSL. Most connection
+    # strings already negotiate SSL by default, but some environments need
+    # it spelled out explicitly to avoid connection errors — so if the URL
+    # doesn't already specify sslmode, add "sslmode=require" to it.
+    _parts = urlsplit(DATABASE_URL)
+    _query = dict(parse_qsl(_parts.query))
+    if "sslmode" not in _query:
+        _query["sslmode"] = "require"
+        DATABASE_URL = urlunsplit((
+            _parts.scheme, _parts.netloc, _parts.path,
+            urlencode(_query), _parts.fragment,
+        ))
 else:
     print(
         "[WARNING] DATABASE_URL is not set — using a local SQLite file at "
         f"'{DB_PATH}'. On Render (and most hosts), the web service's own disk "
         "is wiped on every redeploy AND every time the service restarts after "
         "being idle, so all tracker data will be LOST without warning. "
-        "Attach a Render Postgres instance and set DATABASE_URL to its "
-        "'Internal Database URL' to make data persist."
+        "Create a free Supabase project (https://supabase.com), copy its "
+        "'Connection pooling' URI from Project Settings -> Database, and set "
+        "it as DATABASE_URL on this service to make data persist."
     )
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Mobius365")
@@ -1293,8 +1315,8 @@ ADMIN_PAGE = """
         file, not a real database. Everything entered here — including this data —
         will be LOST the next time the server restarts (which can happen after just
         a few minutes of no traffic). Set the <code>DATABASE_URL</code> environment
-        variable to a persistent Postgres database to fix this. Ask your developer
-        to attach one on the hosting dashboard.
+        variable to a free Supabase Postgres database (supabase.com) to fix this.
+        Ask your developer to set it up on the hosting dashboard.
     </div>
     {% endif %}
 
