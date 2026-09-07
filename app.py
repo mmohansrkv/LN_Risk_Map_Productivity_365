@@ -84,7 +84,14 @@ DATA_FOLDER = "tracker_data"
 #      password. The app will use it automatically.
 # If DATABASE_URL isn't set (e.g. running locally), it falls back to a
 # SQLite file at DB_PATH.
-DATABASE_URL = os.environ.get("https://hljoovovrttakziezvrz.supabase.co/")
+#
+# NOTE: os.environ.get() takes the NAME of an environment variable (e.g.
+# "DATABASE_URL"), not the URL itself. Passing the Supabase project URL
+# directly here (as a previous version of this file did) means the lookup
+# never matches any real env var, so USE_POSTGRES silently stays False and
+# the app falls back to local SQLite forever, even after you set
+# DATABASE_URL in your host's dashboard.
+DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_POSTGRES = bool(DATABASE_URL)
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_FOLDER, "tracker.db"))
 
