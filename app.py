@@ -84,7 +84,7 @@ DATA_FOLDER = "tracker_data"
 #      password. The app will use it automatically.
 # If DATABASE_URL isn't set (e.g. running locally), it falls back to a
 # SQLite file at DB_PATH.
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_URL = os.environ.get("https://hljoovovrttakziezvrz.supabase.co/")
 USE_POSTGRES = bool(DATABASE_URL)
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_FOLDER, "tracker.db"))
 
